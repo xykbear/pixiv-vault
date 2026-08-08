@@ -1,0 +1,19 @@
+services:
+  pixiv-vault:
+    container_name: pixiv-vault
+    image: pixiv-vault:latest
+    hostname: pixiv-vault
+    environment:
+      - PUID=1000   # 需要自行修改填入（与数据目录属主一致，保证下载文件权限正确）
+      - PGID=1000   # 需要自行修改填入
+      - TZ=Asia/Shanghai
+      - PIXIV_ROOT=/data
+      - COOKIES_FILE=/data/cookies.txt
+      - PIXIV_MAX_CONCURRENT=2
+    volumes:
+      - ./data:/data   # 数据目录（含 config.yaml + cookies.txt），挂载到宿主任意路径
+    ports:
+      - "8899:8000"
+    restart: unless-stopped
+    # 代理在 Web UI 设置页配置（写入 /data/config.yaml）
+    # 如需访问宿主机代理：network_mode: host（或把代理端口加进容器网络）

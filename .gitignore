@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 数据与凭据
+data/
+cookies.txt
+*.tar
+
+# macOS
+.DS_Store
