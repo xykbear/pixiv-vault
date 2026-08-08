@@ -20,19 +20,26 @@
 
 首次运行自动创建 `.venv` 并安装依赖。数据目录默认 `./data`（可用 `PIXIV_ROOT` 环境变量覆盖）。
 
-### 容器部署
+### 容器部署（推荐：直接拉取 GHCR 镜像）
+
+镜像发布在 GitHub Container Registry（amd64 + arm64 双架构，push main 自动构建）：
 
 ```bash
-docker build --platform linux/amd64 -t pixiv-vault .
+docker pull ghcr.io/xykbear/pixiv-vault:latest
 docker run -d --name pixiv-vault \
   -e PUID=1000 -e PGID=1000 -e TZ=Asia/Shanghai \
   -e PIXIV_ROOT=/data -e COOKIES_FILE=/data/cookies.txt \
-  -v /path/to/data:/data -p 8899:8000 pixiv-vault
+  -v /path/to/data:/data -p 8899:8000 ghcr.io/xykbear/pixiv-vault:latest
 ```
 
-或使用 `docker-compose.yml`（修改数据目录挂载路径与 PUID/PGID）。
+或使用 `docker-compose.yml`（`image` 已指向 GHCR，改数据目录挂载路径与 PUID/PGID 后 `docker compose up -d`）。
 
-> 非 x86_64 主机（如 Apple Silicon）构建 amd64 镜像时用 `--platform linux/amd64`。
+### 本地构建（开发/自定义）
+
+```bash
+docker build --platform linux/amd64 -t pixiv-vault .
+# Apple Silicon 等非 x86_64 主机构建 amd64 时用 --platform linux/amd64
+```
 
 ## 数据目录结构
 

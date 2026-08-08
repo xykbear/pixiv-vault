@@ -1,8 +1,9 @@
 services:
   pixiv-vault:
     container_name: pixiv-vault
-    image: pixiv-vault:latest
+    image: ghcr.io/xykbear/pixiv-vault:latest
     hostname: pixiv-vault
+    pull_policy: always  # 每次 up 检查 GHCR 最新版（或改为 missing 只在本地无镜像时拉取）
     environment:
       - PUID=1000   # 需要自行修改填入（与数据目录属主一致，保证下载文件权限正确）
       - PGID=1000   # 需要自行修改填入
