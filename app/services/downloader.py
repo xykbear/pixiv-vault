@@ -185,11 +185,11 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
                 task["log"].append(f"作品: {body.get('title')} by {body.get('userName')}")
                 author = body.get("userName") or "unknown"
                 if task["type"] == "ugoira":
-                    parts = [p for p in [_safe(series or '')] + [_safe(c) for c in task['characters'] or []] if p]
-                    base = "-".join(parts + [work_id])
-                    dest_dir = os.path.join(_root(), safe_author_dir(author))
+                    base = work_id
+                    rel = target_path(author, series, characters, is_original)
+                    dest_dir = os.path.join(_root(), rel)
                     _download_ugoira(task, client, body, dest_dir, base)
-                    task["target"] = os.path.relpath(dest_dir, _root())
+                    task["target"] = rel
                 else:
                     urls = pixiv_client.work_original_urls(
                         body, pixiv_client.get_pages(work_id, client))

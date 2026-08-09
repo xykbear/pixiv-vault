@@ -35,7 +35,7 @@ def _static_work_id(filename: str) -> str | None:
 
 
 def _ugoira_base(filename: str) -> str | None:
-    """动图 *.frames.json → base（{系列}-{角色}-{id}）。"""
+    """动图 *.frames.json → base（{id}，新规则动图以 {id} 命名）。"""
     if filename.endswith(".frames.json"):
         return filename[: -len(".frames.json")]
     return None
@@ -136,8 +136,11 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
             "series": series,
             "character": character,
         })
-    # 动图 zip（目录内的）: {系列}-{角色}-{id}.zip
-    zips = sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.endswith(".zip"))
+    # 动图 zip（目录内）: {id}.zip（新规则）或 {系列}-{角色}-{id}.zip（旧平铺兼容）
+    zips = sorted(
+        (f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.endswith(".zip")),
+        key=_file_sort_key,
+    )
     for z in zips:
         base = z[: -len(".zip")]
         images.append({
@@ -148,7 +151,17 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
             "series": series,
             "character": character,
         })
+    # 统一按 作品ID 排序（静态 + 动图混排；旧格式 {系列}-{角色}-{id} 提取尾部数字）
+    images.sort(key=lambda im: (_sort_id(im["id"]), im["type"] == "static", im["id"]))
     return images
+
+
+def _sort_id(work_id: str) -> int:
+    """作品 ID 排序键：纯数字直接转 int，旧三段式取尾部 {id}。"""
+    if work_id.isdigit():
+        return int(work_id)
+    m = re.search(r"-(\d+)$", work_id)
+    return int(m.group(1)) if m else 0
 
 
 def list_works(author: str, series: str, character: str) -> list[dict]:

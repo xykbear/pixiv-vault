@@ -75,7 +75,7 @@ async function api(path, opts) {
 function browseShell() {
   return `
     <div class="max-w-4xl mx-auto">
-      <div class="sticky top-0 z-40 bg-pixiv-light/95 backdrop-blur px-4 pt-3 pb-2">
+      <div class="sticky-bc sticky z-40 bg-pixiv-light/95 backdrop-blur px-4 pt-3 pb-2">
         <div id="breadcrumb" class="text-sm text-gray-500 mb-2 flex items-center gap-1 flex-wrap overflow-x-auto no-scrollbar"></div>
         <div class="relative">
           <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">${ICONS.search}</span>
@@ -246,20 +246,27 @@ function renderImages() {
   const list = q ? state.images.filter(im => (im.id || '').toLowerCase().includes(q)) : state.images;
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无图片'); return; }
-  const grid = list.map((im, idx) => {
-    const thumb = im.type === 'ugoira'
-      ? `/api/thumb/file?rel=${enc(relPath(im, im.file))}`
-      : `/api/thumb/file?rel=${enc(relPath(im, im.file))}`;
-    return `<button onclick="openViewerAt(${idx})" class="block w-full group">
+  const grid = list.map((im) => {
+    const thumb = `/api/thumb/file?rel=${enc(relPath(im, im.file))}`;
+    const ugBadge = im.type === 'ugoira'
+      ? `<div class="absolute top-1 right-1 w-5 h-5 rounded bg-black/60 text-white flex items-center justify-center">${ICONS.film}</div>`
+      : '';
+    return `<button onclick="openViewerAtByFile('${esc(im.file)}')" class="block w-full group relative">
       <div class="bg-white rounded-lg overflow-hidden border border-pixiv-border">
         <div class="grid-img bg-pixiv-light overflow-hidden flex items-center justify-center">
           <img src="${thumb}" loading="lazy" class="w-full h-full object-cover group-active:scale-95 transition"
             onerror="this.parentElement.innerHTML='<div class=&quot;w-full h-full flex items-center justify-center text-gray-300 text-xs&quot;>无</div>'">
         </div>
       </div>
+      ${ugBadge}
     </button>`;
   }).join('');
   content.innerHTML = `<div class="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">${grid}</div>`;
+}
+
+function openViewerAtByFile(file) {
+  const idx = state.images.findIndex(im => im.file === file);
+  if (idx >= 0) openViewerAt(idx);
 }
 
 function relPath(im, file) {
@@ -273,9 +280,11 @@ let _viewer = null;          // Viewer.js 实例（仅静态图）
 // 从任意层级打开：图片列表（当前角色下的全部图片）
 function openViewerAt(idx) {
   const im = state.images[idx];
-  // 动图：独立播放器，不经 Viewer.js
+  // 动图：独立播放器，不经 Viewer.js；支持同目录动图左右滑动切换
   if (im && im.type === 'ugoira') {
-    openUgoiraPlayer(im);
+    const ugList = state.images.filter(x => x.type === 'ugoira');
+    const ugIdx = ugList.findIndex(x => x.file === im.file);
+    openUgoiraPlayer(ugList, Math.max(0, ugIdx));
     return;
   }
   // 静态图：Viewer.js 管理全部图片，从 idx 开始
@@ -294,7 +303,17 @@ function openViewerAt(idx) {
 }
 
 function openUgoiraDirect(author, base) {
-  openUgoiraPlayer({ type: 'ugoira', author, series: '', character: '', id: base });
+  // 从当前层收集动图列表（作者层平铺 or 角色层 ugoira 条目）
+  let list = [];
+  if (state.curLevel === 1) {
+    list = state.entries.filter(e => e.kind === 'ugoira' && e.author === author)
+      .map(e => ({ type: 'ugoira', author: e.author, series: '', character: '', id: e.name }));
+  } else if (state.curLevel === 2) {
+    list = state.characters.filter(c => c.kind === 'ugoira' && c.author === author)
+      .map(c => ({ type: 'ugoira', author: c.author, series: c.series, character: '', id: c.name }));
+  }
+  const idx = list.findIndex(x => x.id === base);
+  openUgoiraPlayer(list.length ? list : [{ type: 'ugoira', author, series: '', character: '', id: base }], Math.max(0, idx));
 }
 
 function renderViewer() {
@@ -362,65 +381,154 @@ function destroyViewer() {
 
 let _ugTimer = null;   // 动图播放定时器
 let _ugCancel = false;  // 动图播放取消标志
+let _ugActive = false;  // 动图播放器是否激活（键盘路由用）
+let _ugPaused = false;  // 动图暂停状态
 
-function openUgoiraPlayer(item) {
-  if (_ugTimer) { clearInterval(_ugTimer); _ugTimer = null; }
+let _ugList = [];      // 当前播放器动图列表
+let _ugIdx = 0;        // 当前动图索引
+let _ugFrameData = []; // 当前动图 frames
+let _ugGen = 0;        // 加载代际计数（滑动切换时使旧请求失效）
+
+function toggleUgoiraPause() {
+  if (!_ugActive) return;
+  _ugPaused = !_ugPaused;
+  if (_ugPaused) {
+    if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
+  } else {
+    _ugPlay();
+  }
+  const stage = $('#v-stage');
+  if (stage) {
+    const badge = stage.querySelector('.ug-pause-badge');
+    if (_ugPaused && !badge) {
+      const d = document.createElement('div');
+      d.className = 'ug-pause-badge absolute top-3 left-3 text-xs bg-black/60 text-white rounded px-2 py-1 pointer-events-none';
+      d.textContent = '已暂停';
+      stage.appendChild(d);
+    } else if (!_ugPaused && badge) {
+      badge.remove();
+    }
+  }
+}
+
+function openUgoiraPlayer(ugList, idx) {
+  if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
   if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
   _ugCancel = false;
+  _ugActive = true;
+  _ugPaused = false;
+  _ugList = ugList;
+  _ugIdx = idx;
+  _ugFrameData = [];
   app.innerHTML = `
     <div id="viewer" class="fixed inset-0 bg-black z-[2025] overflow-hidden">
-      <div id="v-stage" class="w-full h-full flex items-center justify-center"></div>
+      <div id="v-stage" class="w-full h-full flex items-center justify-center touch-pan-y"></div>
       <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020]" style="padding-top: calc(1rem + env(safe-area-inset-top))">
         <button onclick="closeViewer()" class="p-1 -ml-1 opacity-80">${ICONS.back}</button>
-        <div class="flex-1 truncate text-sm">${esc(item.id)}</div>
+        <div class="flex-1 truncate text-sm">${esc(ugList[idx].id)}</div>
+        ${ugList.length > 1 ? `<div id="v-count" class="text-xs bg-black/40 rounded px-2 py-1">${idx + 1}/${ugList.length}</div>` : ''}
       </div>
     </div>`;
   const stage = $('#v-stage');
   stage.innerHTML = `<div class="text-white p-6 text-center text-sm fade-in">加载动图中…</div>`;
-  const author = item.author;
-  const base = item.id;
-  fetch(`/api/ugoira/frames?author=${enc(author)}&base=${enc(base)}`)
+  bindUgoiraGestures(stage);
+  loadUgoiraAt(_ugIdx);
+}
+
+function loadUgoiraAt(idx) {
+  if (_ugCancel) return;
+  const gen = ++_ugGen;
+  _ugIdx = idx;
+  _ugPaused = false;
+  if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
+  const item = _ugList[idx];
+  const stage = $('#v-stage');
+  stage.innerHTML = `<div class="text-white p-6 text-center text-sm fade-in">加载动图中…</div>`;
+  const titleEl = document.querySelector('#viewer .flex-1.truncate');
+  if (titleEl) titleEl.textContent = item.id;
+  const cntEl = $('#v-count');
+  if (cntEl) cntEl.textContent = `${idx + 1}/${_ugList.length}`;
+  const qs = `author=${enc(item.author)}&base=${enc(item.id)}&series=${enc(item.series || '')}&character=${enc(item.character || '')}`;
+  fetch(`/api/ugoira/frames?${qs}`)
     .then(res => { if (!res.ok) throw new Error('frames 请求失败'); return res.json(); })
     .then(frames => {
-      if (_ugCancel || !Array.isArray(frames) || frames.length === 0) throw new Error('无帧数据');
+      if (_ugCancel || gen !== _ugGen || !Array.isArray(frames) || frames.length === 0) throw new Error('无帧数据');
+      _ugFrameData = frames;
       stage.innerHTML = `<div class="text-white p-6 text-center"><canvas id="v-canvas"></canvas></div>`;
       const canvas = $('#v-canvas');
       const ctx = canvas.getContext('2d');
       const img = new Image();
-      img.src = `/api/ugoira/frame?author=${enc(author)}&base=${enc(base)}&file=${enc(frames[0].file)}`;
+      img.src = `/api/ugoira/frame?${qs}&file=${enc(frames[0].file)}`;
       return new Promise((res, rej) => {
-        img.onload = () => res({ frames, img });
+        img.onload = () => res({ frames, img, canvas, ctx });
         img.onerror = () => rej(new Error('首帧加载失败'));
       });
-    })
-    .then(({ frames, img }) => {
-      if (_ugCancel) return;
+     })
+    .then(({ frames, img, canvas, ctx }) => {
+      if (_ugCancel || gen !== _ugGen) return;
       const W = img.naturalWidth, H = img.naturalHeight;
       const maxW = window.innerWidth - 32, maxH = window.innerHeight * 0.6;
       const r = Math.min(maxW / W, maxH / H, 1);
-      const canvas = $('#v-canvas');
-      const ctx = canvas.getContext('2d');
       canvas.width = W; canvas.height = H;
       canvas.style.width = (W * r) + 'px'; canvas.style.height = (H * r) + 'px';
       ctx.drawImage(img, 0, 0, W, H);
-      let fi = 1;
-      let loading = false;
-      const tick = () => {
-        if (_ugCancel) return;
-        if (loading) return;
-        loading = true;
-        ctx.drawImage(img, 0, 0, W, H);
-        const nf = frames[fi];
-        fi = (fi + 1) % frames.length;
-        img.onload = () => { loading = false; if (!_ugCancel) _ugTimer = setTimeout(tick, nf.delay || 120); };
-        img.onerror = () => { loading = false; if (!_ugCancel) _ugTimer = setTimeout(tick, nf.delay || 120); };
-        img.src = `/api/ugoira/frame?author=${enc(author)}&base=${enc(base)}&file=${enc(nf.file)}`;
-      };
-      _ugTimer = setTimeout(tick, frames[0].delay || 120);
+      _ugPlay();
     })
     .catch(err => {
-      if (!_ugCancel) stage.innerHTML = `<div class="text-white/70 p-6 text-center text-sm">动图加载失败: ${esc(err.message)}</div>`;
+      if (!_ugCancel && gen === _ugGen) stage.innerHTML = `<div class="text-white/70 p-6 text-center text-sm">动图加载失败: ${esc(err.message)}</div>`;
     });
+}
+
+// 动图帧播放调度（从当前 _ugFrameData/_ugIdx 播放，暂停后恢复也走这里）
+function _ugPlay() {
+  if (_ugCancel || _ugPaused) return;
+  if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
+  const item = _ugList[_ugIdx];
+  const canvas = $('#v-canvas');
+  if (!item || !canvas) return;
+  const ctx = canvas.getContext('2d');
+  const frames = _ugFrameData;
+  if (!frames || frames.length < 2) return;
+  const gen = _ugGen;
+  const W = canvas.width, H = canvas.height;
+  const qs = `author=${enc(item.author)}&base=${enc(item.id)}&series=${enc(item.series || '')}&character=${enc(item.character || '')}`;
+  const img = new Image();
+  let fi = 1;
+  let loading = false;
+  const tick = () => {
+    if (_ugCancel || _ugPaused || gen !== _ugGen) return;
+    if (loading) return;
+    loading = true;
+    ctx.drawImage(img, 0, 0, W, H);
+    const nf = frames[fi];
+    fi = (fi + 1) % frames.length;
+    img.onload = () => { loading = false; if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, nf.delay || 120); };
+    img.onerror = () => { loading = false; if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, nf.delay || 120); };
+    img.src = `/api/ugoira/frame?${qs}&file=${enc(nf.file)}`;
+  };
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0, W, H);
+    if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, frames[1].delay || 120);
+  };
+  img.src = `/api/ugoira/frame?${qs}&file=${enc(frames[1].file)}`;
+}
+
+function bindUgoiraGestures(stage) {
+  let sx = 0, sy = 0, tracking = false;
+  stage.addEventListener('pointerdown', e => {
+    tracking = true; sx = e.clientX; sy = e.clientY;
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointerup', e => {
+    if (!tracking) return;
+    tracking = false;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      if (dx < 0 && _ugIdx < _ugList.length - 1) loadUgoiraAt(_ugIdx + 1);
+      else if (dx > 0 && _ugIdx > 0) loadUgoiraAt(_ugIdx - 1);
+    }
+  });
+  stage.addEventListener('pointercancel', () => { tracking = false; });
 }
 
 function hideViewer() {
@@ -430,6 +538,8 @@ function hideViewer() {
 
 function closeViewer() {
   _ugCancel = true;
+  _ugActive = false;
+  _ugPaused = false;
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
   if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
   destroyViewer();
@@ -455,8 +565,15 @@ function closeViewer() {
 function nextPage() { if (_viewer) _viewer.next(); }
 function prevPage() { if (_viewer) _viewer.prev(); }
 
-// 键盘
+// 键盘：静态 viewer（Viewer.js）或动图播放器
 document.addEventListener('keydown', (e) => {
+  if (_ugActive) {
+    if (e.key === 'ArrowRight' && _ugIdx < _ugList.length - 1) loadUgoiraAt(_ugIdx + 1);
+    else if (e.key === 'ArrowLeft' && _ugIdx > 0) loadUgoiraAt(_ugIdx - 1);
+    else if (e.key === 'Escape') closeViewer();
+    else if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); toggleUgoiraPause(); }
+    return;
+  }
   if (!state.viewer) return;
   if (e.key === 'ArrowRight') nextPage();
   if (e.key === 'ArrowLeft') prevPage();
@@ -486,25 +603,11 @@ function renderDownload() {
       <div class="flex gap-2 mb-4">
         <input id="dl-url" type="text" placeholder="粘贴 pixiv 链接 (artworks/{id})"
           class="flex-1 px-3 py-2 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
-        <button id="dl-paste" onclick="doPaste()" class="px-3 py-2 rounded-lg border border-pixiv-border bg-white text-sm text-gray-600">粘贴</button>
         <button id="dl-preview" onclick="doPreview()" class="px-4 py-2 rounded-lg bg-pixiv-blue text-white text-sm font-medium">预览</button>
       </div>
       <div id="dl-result"></div>
       <div id="dl-task-list" class="mt-4 space-y-3"></div>
     </div>`;
-}
-
-async function doPaste() {
-  const input = $('#dl-url');
-  try {
-    const text = await navigator.clipboard.readText();
-    if (text) {
-      input.value = text.trim();
-      input.focus();
-    }
-  } catch (e) {
-    input.focus();
-  }
 }
 
 async function doPreview() {

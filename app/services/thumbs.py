@@ -1,17 +1,14 @@
 """缩略图服务：Pillow 生成 + .thumbs/{cache_key}.webp 磁盘缓存。
 
-- 静态图：对任意图片文件生成缩略图，缓存键 = {work_id}_p{page}
-- 动图：取 zip 第一帧生成，缓存键 = {base}
+- 静态图：对任意图片文件生成缩略图，缓存键 = hash(rel_path)
+- 动图：取 zip 第一帧生成，缓存键 = hash(rel_path)
 """
 import hashlib
 import io
 import os
-import re
 import zipfile
 
 from .. import config
-
-_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp)$", re.I)
 
 
 def thumb_root() -> str:
@@ -45,22 +42,6 @@ def _cache_path(key: str) -> str:
     return os.path.join(thumb_root(), f"{key}.webp")
 
 
-def get_thumbnail(work_id: str) -> bytes | None:
-    """兼容旧接口：按作品 ID 取封面缩略图（静态 _p0 或动图 zip 首帧）。"""
-    cfg = config.load_config()
-    max_size = int(cfg.get("thumb_size") or 300)
-    cache = _cache_path(work_id)
-    if os.path.exists(cache):
-        with open(cache, "rb") as f:
-            return f.read()
-    data = _thumbnail_bytes_by_work(work_id, max_size)
-    if data:
-        with open(cache, "wb") as f:
-            f.write(data)
-        return data
-    return None
-
-
 def get_thumbnail_file(rel_path: str) -> bytes | None:
     """按相对 pixiv/ 根的图片路径生成缩略图（含动图 zip）。
 
@@ -89,32 +70,3 @@ def get_thumbnail_file(rel_path: str) -> bytes | None:
     with open(cache, "wb") as f:
         f.write(data)
     return data
-
-
-def _thumbnail_bytes_by_work(work_id: str, max_size: int) -> bytes | None:
-    """按作品 ID 找封面（静态 _p0 或动图 zip）生成缩略图字节。"""
-    root = config.get_root()
-    target = f"{work_id}_p0"
-    for dirpath, _dirs, files in os.walk(root):
-        if ".thumbs" in dirpath:
-            continue
-        for f in files:
-            stem = _EXT_RE.sub("", f)
-            if stem == target:
-                return _thumb_bytes_from_img(os.path.join(dirpath, f), max_size)
-    # 单页作品 {id}.ext
-    for dirpath, _dirs, files in os.walk(root):
-        if ".thumbs" in dirpath:
-            continue
-        for f in files:
-            stem = _EXT_RE.sub("", f)
-            if stem == work_id:
-                return _thumb_bytes_from_img(os.path.join(dirpath, f), max_size)
-    # 动图
-    for dirpath, _dirs, files in os.walk(root):
-        if ".thumbs" in dirpath:
-            continue
-        for f in files:
-            if f.endswith(f"-{work_id}.zip"):
-                return _thumb_bytes_from_zip(os.path.join(dirpath, f), max_size)
-    return None

@@ -45,6 +45,8 @@ tailwind.config = {
               border-bottom: 1px solid theme('colors.pixiv.border');
               padding-top: env(safe-area-inset-top); }
     #app { padding-bottom: 0; padding-top: calc(56px + env(safe-area-inset-top)); }
+    /* 桌面端 tabbar 在顶部，面包屑/搜索框 sticky 需让出 tabbar 高度 */
+    .sticky-bc { top: calc(56px + env(safe-area-inset-top)) !important; }
   }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   /* 触屏操作元素禁用文本选择 */
@@ -84,6 +86,6 @@ tailwind.config = {
   </button>
 </nav>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=20260809b"></script>
 </body>
 </html>

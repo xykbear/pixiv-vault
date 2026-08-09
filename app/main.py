@@ -57,14 +57,6 @@ def api_thumb_file(rel: str):
     return Response(content=data, media_type="image/webp")
 
 
-@app.get("/api/thumb/{work_id}")
-def api_thumb(work_id: str):
-    data = thumbs.get_thumbnail(work_id)
-    if data is None:
-        raise HTTPException(404, "缩略图不存在")
-    return Response(content=data, media_type="image/webp")
-
-
 @app.get("/api/img")
 def api_img(author: str, series: str, file: str, character: str = ""):
     if character:
@@ -78,16 +70,18 @@ def api_img(author: str, series: str, file: str, character: str = ""):
 
 
 @app.get("/api/ugoira/frames")
-def api_ugoira_frames(author: str, base: str):
-    fp = _safe_path_join(config.get_root(), os.path.join(author, f"{base}.frames.json"))
+def api_ugoira_frames(author: str, base: str, series: str = "", character: str = ""):
+    rel = os.path.join(author, series, character, f"{base}.frames.json") if series else os.path.join(author, f"{base}.frames.json")
+    fp = _safe_path_join(config.get_root(), rel)
     if not os.path.isfile(fp):
         raise HTTPException(404, "frames.json 不存在")
     return FileResponse(fp, media_type="application/json")
 
 
 @app.get("/api/ugoira/frame")
-def api_ugoira_frame(author: str, base: str, file: str):
-    zip_path = _safe_path_join(config.get_root(), os.path.join(author, f"{base}.zip"))
+def api_ugoira_frame(author: str, base: str, file: str, series: str = "", character: str = ""):
+    rel = os.path.join(author, series, character, f"{base}.zip") if series else os.path.join(author, f"{base}.zip")
+    zip_path = _safe_path_join(config.get_root(), rel)
     if not os.path.isfile(zip_path):
         raise HTTPException(404, "zip 不存在")
     try:
