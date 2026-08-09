@@ -93,15 +93,20 @@ def preview(work_id: str) -> dict:
         client.close()
 
 
-def _download_static(task: dict, client, urls: list, dest_dir: str) -> None:
+def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str) -> None:
     os.makedirs(dest_dir, exist_ok=True)
     total = len(urls)
     task["progress"] = 0
     task["total"] = total
     done = 0
+    work_id = task["work_id"]
+    # meta（与本地工作流一致：{work_id}.meta.json）
+    meta_path = os.path.join(dest_dir, f"{work_id}.meta.json")
+    if not os.path.exists(meta_path):
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(body, f, ensure_ascii=False, indent=1)
     for idx, url in enumerate(urls):
         ext = os.path.splitext(url.split("/")[-1])[1] or ".jpg"
-        work_id = task["work_id"]
         dest = os.path.join(dest_dir, f"{work_id}_p{idx}{ext}")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
             done += 1
@@ -190,7 +195,7 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
                         body, pixiv_client.get_pages(work_id, client))
                     rel = target_path(author, series, characters, is_original)
                     dest_dir = os.path.join(_root(), rel)
-                    _download_static(task, client, urls, dest_dir)
+                    _download_static(task, client, body, urls, dest_dir)
                     task["target"] = rel
                 task["status"] = "done"
                 task["progress"] = task["total"] or task["progress"]
