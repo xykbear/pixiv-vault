@@ -34,11 +34,18 @@ tailwind.config = {
   html, body { height: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
   /* Viewer.js 容器背景统一为纯黑（默认 backdrop 是半透明） */
   .viewer-container { background-color: #000; }
-  #app { padding-bottom: 64px; }
+  /* iOS 安全区：底部留白（tabbar 高度 + Home 指示条） */
+  #app { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .tabbar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
             background: rgba(255,255,255,0.95); backdrop-filter: blur(8px);
-            border-top: 1px solid theme('colors.pixiv.border'); }
-  @media (min-width: 768px) { .tabbar { top: 0; bottom: auto; border-top: none; border-bottom: 1px solid theme('colors.pixiv.border'); } #app { padding-bottom: 0; padding-top: 56px; } }
+            border-top: 1px solid theme('colors.pixiv.border');
+            padding-bottom: env(safe-area-inset-bottom); }
+  @media (min-width: 768px) {
+    .tabbar { top: 0; bottom: auto; padding-bottom: 0; border-top: none;
+              border-bottom: 1px solid theme('colors.pixiv.border');
+              padding-top: env(safe-area-inset-top); }
+    #app { padding-bottom: 0; padding-top: calc(56px + env(safe-area-inset-top)); }
+  }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   /* 触屏操作元素禁用文本选择 */
   button, .tabbar, .chip, img, #viewer, #content, #breadcrumb {

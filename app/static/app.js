@@ -306,7 +306,7 @@ function renderViewer() {
           <li><img src="/api/img?author=${enc(it.author)}&series=${enc(it.series)}&character=${enc(it.character)}&file=${enc(it.file)}" data-idx="${i}"></li>
         `).join('')}
       </ul>
-      <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020] pointer-events-auto">
+      <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020] pointer-events-auto" style="padding-top: calc(1rem + env(safe-area-inset-top))">
         <button onclick="hideViewer()" class="p-1 -ml-1 opacity-80">${ICONS.back}</button>
         <div class="flex-1 truncate text-sm">${esc(v.title || '')}</div>
         <div id="v-count" class="text-xs bg-black/40 rounded px-2 py-1"></div>
@@ -370,7 +370,7 @@ function openUgoiraPlayer(item) {
   app.innerHTML = `
     <div id="viewer" class="fixed inset-0 bg-black z-[2025] overflow-hidden">
       <div id="v-stage" class="w-full h-full flex items-center justify-center"></div>
-      <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020]">
+      <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020]" style="padding-top: calc(1rem + env(safe-area-inset-top))">
         <button onclick="closeViewer()" class="p-1 -ml-1 opacity-80">${ICONS.back}</button>
         <div class="flex-1 truncate text-sm">${esc(item.id)}</div>
       </div>
@@ -486,11 +486,25 @@ function renderDownload() {
       <div class="flex gap-2 mb-4">
         <input id="dl-url" type="text" placeholder="粘贴 pixiv 链接 (artworks/{id})"
           class="flex-1 px-3 py-2 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
+        <button id="dl-paste" onclick="doPaste()" class="px-3 py-2 rounded-lg border border-pixiv-border bg-white text-sm text-gray-600">粘贴</button>
         <button id="dl-preview" onclick="doPreview()" class="px-4 py-2 rounded-lg bg-pixiv-blue text-white text-sm font-medium">预览</button>
       </div>
       <div id="dl-result"></div>
       <div id="dl-task-list" class="mt-4 space-y-3"></div>
     </div>`;
+}
+
+async function doPaste() {
+  const input = $('#dl-url');
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      input.value = text.trim();
+      input.focus();
+    }
+  } catch (e) {
+    input.focus();
+  }
 }
 
 async function doPreview() {
@@ -647,8 +661,14 @@ function startDownload(workId, opts = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, series, characters, is_original: isOrig })
   }).then(task => {
-    // 清空输入框，方便输入下一个链接（仅 UI 发起时）
-    if (opts.url === undefined) $('#dl-url').value = '';
+    // 清空输入框并重置预览区域（仅 UI 发起时）
+    if (opts.url === undefined) {
+      $('#dl-url').value = '';
+      state.previewMeta = null;
+      state.selectedTags = [];
+      const r = $('#dl-result');
+      if (r) r.innerHTML = '';
+    }
     if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
     showTask(task, { url, series, characters, is_original: isOrig });
   }).catch(err => {
@@ -675,7 +695,7 @@ function showTask(task, meta) {
     <div class="flex gap-2 mt-2 task-actions">
       <button class="task-cancel px-3 py-1.5 rounded border border-red-200 text-red-500 text-xs">取消</button>
     </div>`;
-  list.appendChild(div);
+  list.insertBefore(div, list.firstChild);  // 新任务置顶
   const entry = {
     statusEl: div.querySelector('.task-status'),
     barEl: div.querySelector('.task-bar'),
