@@ -10,8 +10,10 @@ const state = {
   characters: [],
   images: [],
   breadcrumb: [],
-  scrollPos: 0,        // 列表滚动位置（关闭查看器后恢复）
+  scrollPosByLevel: {},  // 每层滚动位置（0=作者 1=系列 2=角色 3=图片），面包屑返回时恢复
   curLevel: 0,         // 0=作者 1=系列 2=角色 3=图片
+  // 排序（localStorage 持久化）
+  sortMode: localStorage.getItem('pixiv_sort') || 'date',
   // 查看器
   viewer: null,
   dlMode: 'tag',        // 'orig' | 'tag'
@@ -31,6 +33,7 @@ const ICONS = {
   search: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
   check: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
   x: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  refresh: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>',
 };
 
 function showView(name) {
@@ -77,10 +80,19 @@ function browseShell() {
     <div class="max-w-4xl mx-auto">
       <div class="sticky-bc sticky z-40 bg-pixiv-light/95 backdrop-blur px-4 pt-3 pb-2">
         <div id="breadcrumb" class="text-sm text-gray-500 mb-2 flex items-center gap-1 flex-wrap overflow-x-auto no-scrollbar"></div>
-        <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">${ICONS.search}</span>
-          <input id="search" type="search" placeholder="搜索" autocomplete="off"
-            class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
+        <div class="flex gap-2">
+          <div class="relative flex-1">
+            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">${ICONS.search}</span>
+            <input id="search" type="search" placeholder="搜索" autocomplete="off"
+              class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
+          </div>
+          ${state.curLevel < 3 ? `
+          <button id="sort-btn" onclick="toggleSort()" title="切换排序"
+            class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-xs text-gray-500 shrink-0">
+            ${state.sortMode === 'date' ? '按日期' : '按名称'}
+          </button>` : ''}
+          <button onclick="refreshLevel()" title="刷新当前层"
+            class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-gray-500 shrink-0">${ICONS.refresh}</button>
         </div>
       </div>
       <div id="content" class="px-4 py-3"></div>
@@ -90,15 +102,16 @@ function browseShell() {
 async function renderBrowse() {
   state.curLevel = 0;
   state.breadcrumb = [];
-  state.scrollPos = 0;
   if (state.authors.length === 0) {
     const d = await api('/api/tree/authors');
     state.authors = d.authors;
   }
+  state.scrollPosByLevel[0] = 0;
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
   renderAuthors();
+  requestAnimationFrame(() => window.scrollTo(0, 0));
 }
 
 function bindSearch() {
@@ -127,14 +140,62 @@ function renderBreadcrumb() {
 }
 
 function navCrumb(i) {
-  if (i === 0) { renderBrowse(); return; }
-  if (i === 1) { loadSeries(state.breadcrumb[0]); return; }
-  if (i === 2) { loadCharacters(state.breadcrumb[0], state.breadcrumb[1]); return; }
+  const target = state.breadcrumb.slice(0, i);
+  state.breadcrumb = target;
+  state.curLevel = i;
+  // 面包屑返回：清空搜索框，用缓存数据渲染对应层，恢复该层滚动位置
+  app.innerHTML = browseShell();
+  bindSearch();
+  renderBreadcrumb();
+  if (i === 0) renderAuthors();
+  else if (i === 1) renderSeries();
+  else if (i === 2) renderCharacters();
+  else if (i === 3) renderImages();
+  requestAnimationFrame(() => window.scrollTo(0, state.scrollPosByLevel[i] || 0));
+}
+
+// 刷新当前层数据（不依赖浏览器缓存，重新拉取）
+async function refreshLevel() {
+  const i = state.curLevel;
+  const keep = state.scrollPosByLevel[i] || 0;
+  if (i === 0) {
+    const d = await api('/api/tree/authors');
+    state.authors = d.authors;
+    renderAuthors();
+  } else if (i === 1) {
+    const d = await api(`/api/tree/entries?author=${enc(state.breadcrumb[0])}`);
+    state.entries = d.entries;
+    renderSeries();
+  } else if (i === 2) {
+    const d = await api(`/api/tree/characters?author=${enc(state.breadcrumb[0])}&series=${enc(state.breadcrumb[1])}`);
+    state.characters = d.characters;
+    renderCharacters();
+  } else if (i === 3) {
+    const b = state.breadcrumb;
+    const qs = b[2] ? `author=${enc(b[0])}&series=${enc(b[1])}&character=${enc(b[2])}` : `author=${enc(b[0])}&series=${enc(b[1])}`;
+    const d = await api(`/api/tree/images?${qs}`);
+    state.images = d.images;
+    renderImages();
+  }
+  requestAnimationFrame(() => window.scrollTo(0, keep));
+}
+
+// 切换排序（名称/日期），持久化到 localStorage
+function toggleSort() {
+  state.sortMode = state.sortMode === 'name' ? 'date' : 'name';
+  localStorage.setItem('pixiv_sort', state.sortMode);
+  const btn = $('#sort-btn');
+  if (btn) btn.textContent = state.sortMode === 'date' ? '按日期' : '按名称';
+  if (state.curLevel === 0) renderAuthors();
+  else if (state.curLevel === 1) renderSeries();
+  else if (state.curLevel === 2) renderCharacters();
+  else if (state.curLevel === 3) renderImages();
 }
 
 function renderAuthors() {
   const q = query();
-  const list = q ? state.authors.filter(a => a.author.toLowerCase().includes(q)) : state.authors;
+  const base = sortItems(state.authors, 'author');
+  const list = q ? base.filter(a => a.author.toLowerCase().includes(q)) : base;
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无匹配作者'); return; }
   content.innerHTML = list.map(a => `
@@ -143,7 +204,7 @@ function renderAuthors() {
       <div class="w-10 h-10 rounded-md bg-pixiv-light flex items-center justify-center text-pixiv-blue shrink-0">${ICONS.folder}</div>
       <div class="flex-1 min-w-0">
         <div class="font-medium truncate">${esc(a.author)}</div>
-        <div class="text-xs text-gray-400">作者</div>
+        <div class="text-xs text-gray-400">作者 · ${fmtDate(a.mtime)}</div>
       </div>
       <span class="text-gray-300">${ICONS.chevron}</span>
     </button>`).join('');
@@ -154,16 +215,18 @@ async function loadSeries(author) {
   state.entries = d.entries;
   state.breadcrumb = [author];
   state.curLevel = 1;
-  state.scrollPos = 0;
+  state.scrollPosByLevel[1] = 0;
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
   renderSeries();
+  requestAnimationFrame(() => window.scrollTo(0, 0));
 }
 
 function renderSeries() {
   const q = query();
-  const list = q ? state.entries.filter(e => (e.name || '').toLowerCase().includes(q)) : state.entries;
+  const base = sortItems(state.entries, 'name');
+  const list = q ? base.filter(e => (e.name || '').toLowerCase().includes(q)) : base;
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无系列'); return; }
   content.innerHTML = list.map(e => {
@@ -173,7 +236,7 @@ function renderSeries() {
         <div class="w-10 h-10 rounded-md bg-purple-50 text-purple-500 flex items-center justify-center shrink-0">${ICONS.film}</div>
         <div class="flex-1 min-w-0">
           <div class="font-medium truncate">${esc(e.name)}</div>
-          <div class="text-xs text-gray-400">动图</div>
+          <div class="text-xs text-gray-400">动图 · ${fmtDate(e.mtime)}</div>
         </div>
         <span class="text-gray-300">${ICONS.chevron}</span>
       </button>`;
@@ -186,7 +249,7 @@ function renderSeries() {
       <div class="w-10 h-10 rounded-md bg-pixiv-light text-pixiv-blue flex items-center justify-center shrink-0">${ICONS.folder}</div>
       <div class="flex-1 min-w-0">
         <div class="font-medium truncate">${esc(e.name)}</div>
-        <div class="text-xs text-gray-400">${label}</div>
+        <div class="text-xs text-gray-400">${label} · ${fmtDate(e.mtime)}</div>
       </div>
       <span class="text-gray-300">${ICONS.chevron}</span>
     </button>`;
@@ -198,16 +261,18 @@ async function loadCharacters(author, series) {
   state.characters = d.characters;
   state.breadcrumb = [author, series];
   state.curLevel = 2;
-  state.scrollPos = 0;
+  state.scrollPosByLevel[2] = 0;
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
   renderCharacters();
+  requestAnimationFrame(() => window.scrollTo(0, 0));
 }
 
 function renderCharacters() {
   const q = query();
-  const list = q ? state.characters.filter(c => (c.name || '').toLowerCase().includes(q)) : state.characters;
+  const base = sortItems(state.characters, 'name');
+  const list = q ? base.filter(c => (c.name || '').toLowerCase().includes(q)) : base;
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无角色'); return; }
   content.innerHTML = list.map(c => {
@@ -220,7 +285,7 @@ function renderCharacters() {
       ${icon}
       <div class="flex-1 min-w-0">
         <div class="font-medium truncate">${esc(c.name)}</div>
-        <div class="text-xs text-gray-400">${c.kind === 'ugoira' ? '动图' : '角色'}</div>
+        <div class="text-xs text-gray-400">${c.kind === 'ugoira' ? '动图' : '角色'} · ${fmtDate(c.mtime)}</div>
       </div>
       <span class="text-gray-300">${ICONS.chevron}</span>
     </button>`;
@@ -234,11 +299,12 @@ async function loadImages(author, series, character) {
   state.images = d.images;
   state.breadcrumb = character ? [author, series, character] : [author, series];
   state.curLevel = 3;
-  state.scrollPos = 0;
+  state.scrollPosByLevel[3] = 0;
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
   renderImages();
+  requestAnimationFrame(() => window.scrollTo(0, 0));
 }
 
 function renderImages() {
@@ -551,7 +617,7 @@ function closeViewer() {
     renderBreadcrumb();
     renderImages();
     requestAnimationFrame(() => {
-      window.scrollTo(0, state.scrollPos);
+      window.scrollTo(0, state.scrollPosByLevel[3] || 0);
     });
   } else if (state.curLevel === 2) {
     loadCharacters(state.breadcrumb[0], state.breadcrumb[1]);
@@ -580,9 +646,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') hideViewer();
 });
 
-// 记录列表滚动位置
+// 记录列表滚动位置（按当前层级）
 window.addEventListener('scroll', () => {
-  if (!state.viewer) state.scrollPos = window.scrollY;
+  if (!state.viewer) state.scrollPosByLevel[state.curLevel] = window.scrollY;
 });
 
 // ================= 工具函数 =================
@@ -594,9 +660,30 @@ function esc(s) {
 function enc(s) { return encodeURIComponent(s ?? ''); }
 function empty(msg) { return `<div class="text-center text-gray-400 py-10 text-sm">${msg}</div>`; }
 
+// 按名称或日期排序（日期降序：最新在前；名称升序）
+function sortItems(items, nameKey) {
+  const arr = [...items];
+  if (state.sortMode === 'date') {
+    arr.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  } else {
+    arr.sort((a, b) => String(a[nameKey] || '').localeCompare(String(b[nameKey] || ''), 'zh-Hans-CN'));
+  }
+  return arr;
+}
+
+// mtime 时间戳 → 可读日期
+function fmtDate(ts) {
+  if (!ts) return '未知';
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // ================= 下载视图 =================
 
 function renderDownload() {
+  // 切回下载 tab：丢弃上一次会话的 DOM 引用与轮询，从服务端重新拉取任务
+  if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
+  state.tasks = {};
   app.innerHTML = `
     <div class="max-w-2xl mx-auto px-4 py-4">
       <h2 class="text-lg font-semibold mb-4">下载作品</h2>
@@ -608,6 +695,30 @@ function renderDownload() {
       <div id="dl-result"></div>
       <div id="dl-task-list" class="mt-4 space-y-3"></div>
     </div>`;
+  // 拉取服务端已有任务（含快捷指令 API 触发的），渲染下载中/失败任务
+  loadServerTasks();
+}
+
+// 拉取服务端全部下载任务并渲染（复用 showTask 轮询机制）
+async function loadServerTasks() {
+  const list = $('#dl-task-list');
+  if (!list) return;
+  try {
+    const d = await api('/api/download');
+    for (const t of d.tasks) {
+      if (state.tasks[t.task_id]) continue;  // 本会话已跟踪的跳过
+      showTask(t, {
+        url: t.url,
+        series: t.series,
+        characters: t.characters,
+        is_original: t.is_original,
+      });
+      // 立即渲染状态/按钮（否则已终结任务会短暂显示失效的取消按钮）
+      updateTaskUI(t.task_id, t);
+    }
+  } catch (e) {
+    // 列表拉取失败不影响手工创建任务
+  }
 }
 
 async function doPreview() {
@@ -830,10 +941,18 @@ async function pollAllTasks() {
       const t = await api('/api/download/' + id);
       updateTaskUI(id, t);
     } catch (e) {
-      // 任务不存在则标记为已移除
+      // 任务不存在则标记为已移除，并提供清除按钮
       const e2 = state.tasks[id];
       if (e2 && e2.statusEl) e2.statusEl.textContent = '已移除';
       if (e2) e2.done = true;
+      if (e2 && e2.actionsEl && !e2.clearBtn) {
+        const btn = document.createElement('button');
+        btn.className = 'px-3 py-1.5 rounded border border-gray-300 text-gray-500 text-xs';
+        btn.textContent = '清除';
+        btn.onclick = () => clearTask(id);
+        e2.actionsEl.appendChild(btn);
+        e2.clearBtn = btn;
+      }
     }
   }
 }
@@ -856,6 +975,17 @@ function updateTaskUI(id, t) {
   }
   if (t.status === 'done' || t.status === 'error' || t.status === 'cancelled') {
     entry.done = true;
+    // 终结状态隐藏取消按钮（任务已结束，无法取消），显示「清除」
+    const cancelBtn = divOf(entry).querySelector('.task-cancel');
+    if (cancelBtn) cancelBtn.remove();
+    if (!entry.clearBtn) {
+      const btn = document.createElement('button');
+      btn.className = 'px-3 py-1.5 rounded border border-gray-300 text-gray-500 text-xs';
+      btn.textContent = '清除';
+      btn.onclick = () => clearTask(id);
+      entry.actionsEl.appendChild(btn);
+      entry.clearBtn = btn;
+    }
     // 失败时显示「重试」按钮
     if (t.status === 'error' && entry.meta && entry.meta.url) {
       if (!entry.retryBtn) {
@@ -868,6 +998,28 @@ function updateTaskUI(id, t) {
       }
     }
   }
+}
+
+async function clearTask(taskId) {
+  try {
+    await api('/api/download/' + taskId + '/clear', { method: 'DELETE' });
+  } catch (e) {
+    // 服务端已无该任务（如已被其他会话清除）时仍允许本地移除；其余错误提示
+    if (!String(e.message).includes('404')) {
+      alert('清除失败: ' + e.message);
+      return;
+    }
+  }
+  const entry = state.tasks[taskId];
+  if (entry) {
+    const div = divOf(entry);
+    if (div) div.remove();
+    delete state.tasks[taskId];
+  }
+}
+
+function divOf(entry) {
+  return entry.actionsEl ? entry.actionsEl.closest('.bg-white.rounded-lg') : null;
 }
 
 function retryTask(meta) {

@@ -120,6 +120,11 @@ def api_create_download(req: dict):
     return task
 
 
+@app.get("/api/download")
+def api_list_downloads():
+    return {"tasks": downloader.list_tasks()}
+
+
 @app.get("/api/download/{task_id}")
 def api_task(task_id: str):
     t = downloader.get_task(task_id)
@@ -131,6 +136,13 @@ def api_task(task_id: str):
 @app.delete("/api/download/{task_id}")
 def api_cancel(task_id: str):
     return {"cancelled": downloader.cancel_task(task_id)}
+
+
+@app.delete("/api/download/{task_id}/clear")
+def api_remove_task(task_id: str):
+    if not downloader.remove_task(task_id):
+        raise HTTPException(404, "任务不存在或仍在运行，无法清除")
+    return {"removed": True}
 
 
 # ---------- 配置 ----------

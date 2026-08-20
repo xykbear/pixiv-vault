@@ -106,6 +106,8 @@ def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str) 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(body, f, ensure_ascii=False, indent=1)
     for idx, url in enumerate(urls):
+        if task["status"] == "cancelled":
+            return
         ext = os.path.splitext(url.split("/")[-1])[1] or ".jpg"
         dest = os.path.join(dest_dir, f"{work_id}_p{idx}{ext}")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
@@ -140,15 +142,16 @@ def _download_ugoira(task: dict, client, body, dest_dir: str, base: str) -> None
     if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
         task["progress"] = os.path.getsize(zip_path)
         task["total"] = os.path.getsize(zip_path)
-    else:
+    elif task["status"] != "cancelled":
         pixiv_client.download_with_progress(client, zip_url, zip_path, on_progress,
                                             timeout=600)
     # meta
-    meta_path = os.path.join(dest_dir, f"{base}.meta.json")
-    if not os.path.exists(meta_path):
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(body, f, ensure_ascii=False, indent=1)
-    task["log"].append(f"动图 {work_id} 完成：{len(frames)} 帧")
+    if task["status"] != "cancelled":
+        meta_path = os.path.join(dest_dir, f"{base}.meta.json")
+        if not os.path.exists(meta_path):
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(body, f, ensure_ascii=False, indent=1)
+        task["log"].append(f"动图 {work_id} 完成：{len(frames)} 帧")
 
 
 def create_task(url: str, series: str | None, characters: list | None, is_original: bool = False) -> dict:
@@ -160,6 +163,7 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
     task = {
         "task_id": task_id,
         "work_id": work_id,
+        "url": url,
         "status": "pending",
         "type": "unknown",
         "progress": 0,
@@ -167,6 +171,7 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
         "log": [],
         "series": series or "",
         "characters": characters or [],
+        "is_original": is_original,
         "error": "",
         "target": "",
     }
@@ -197,12 +202,15 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
                     dest_dir = os.path.join(_root(), rel)
                     _download_static(task, client, body, urls, dest_dir)
                     task["target"] = rel
-                task["status"] = "done"
-                task["progress"] = task["total"] or task["progress"]
+                # 取消期间线程可能仍在跑，终结状态以取消为准（不覆盖 cancelled）
+                if task["status"] != "cancelled":
+                    task["status"] = "done"
+                    task["progress"] = task["total"] or task["progress"]
             except Exception as e:
-                task["status"] = "error"
-                task["error"] = str(e)
-                task["log"].append(f"错误: {e}")
+                if task["status"] != "cancelled":
+                    task["status"] = "error"
+                    task["error"] = str(e)
+                    task["log"].append(f"错误: {e}")
             finally:
                 client.close()
 
@@ -215,10 +223,26 @@ def get_task(task_id: str) -> dict | None:
         return _TASKS.get(task_id)
 
 
+def list_tasks() -> list[dict]:
+    """返回全部任务（含快捷指令 API 触发的），用于下载视图展示。"""
+    with _LOCK:
+        return list(_TASKS.values())
+
+
 def cancel_task(task_id: str) -> bool:
     with _LOCK:
         t = _TASKS.get(task_id)
         if t and t["status"] in ("pending", "running"):
             t["status"] = "cancelled"
+            return True
+    return False
+
+
+def remove_task(task_id: str) -> bool:
+    """移除任务（仅终结状态：done/error/cancelled）。运行中的请先取消。"""
+    with _LOCK:
+        t = _TASKS.get(task_id)
+        if t and t["status"] in ("done", "error", "cancelled"):
+            del _TASKS[task_id]
             return True
     return False

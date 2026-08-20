@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import unicodedata
 
 from .. import config
 
@@ -48,7 +49,7 @@ def list_authors() -> list[dict]:
     for name in sorted(os.listdir(root)):
         p = os.path.join(root, name)
         if os.path.isdir(p) and not name.startswith(".") and name != "_meta_skip":
-            authors.append({"author": name})
+            authors.append({"author": name, "mtime": os.path.getmtime(p)})
     return authors
 
 
@@ -65,12 +66,17 @@ def list_series(author: str) -> list[dict]:
             continue
         if os.path.isdir(p):
             kind = "series"
-            if name in ("オリジナル", "_未分類", "_未分类"):
-                kind = name
-            entries.append({"author": author, "name": name, "kind": kind})
+            # NAS 目录名可能是 NFD 分解形式（如 オリジナル → オリジナル），
+            # 用 NFC 归一化比较以识别特殊目录（AGENTS.md：禁止对目录做 NFKC/NFD 重命名）
+            norm = unicodedata.normalize("NFC", name)
+            if norm in ("オリジナル", "_未分類", "_未分类"):
+                kind = norm
+            entries.append({"author": author, "name": name, "kind": kind,
+                            "mtime": os.path.getmtime(p)})
         elif os.path.isfile(p) and _ugoira_base(name):
             base = _ugoira_base(name)
-            entries.append({"author": author, "name": base, "kind": "ugoira"})
+            entries.append({"author": author, "name": base, "kind": "ugoira",
+                            "mtime": os.path.getmtime(p)})
     return entries
 
 
@@ -86,10 +92,12 @@ def list_characters(author: str, series: str) -> list[dict]:
             continue
         p = os.path.join(d, name)
         if os.path.isdir(p):
-            characters.append({"author": author, "series": series, "name": name, "kind": "character"})
+            characters.append({"author": author, "series": series, "name": name,
+                               "kind": "character", "mtime": os.path.getmtime(p)})
         elif _ugoira_base(name):
             base = _ugoira_base(name)
-            characters.append({"author": author, "series": series, "name": base, "kind": "ugoira"})
+            characters.append({"author": author, "series": series, "name": base,
+                               "kind": "ugoira", "mtime": os.path.getmtime(p)})
     return characters
 
 
