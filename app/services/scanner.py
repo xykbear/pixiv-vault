@@ -66,10 +66,10 @@ def list_series(author: str) -> list[dict]:
             continue
         if os.path.isdir(p):
             kind = "series"
-            # NAS 目录名可能是 NFD 分解形式（如 オリジナル → オリジナル），
+            # NAS 目录名可能是 NFD 分解形式（如 _未分類 → _未分󰡔類），
             # 用 NFC 归一化比较以识别特殊目录（AGENTS.md：禁止对目录做 NFKC/NFD 重命名）
             norm = unicodedata.normalize("NFC", name)
-            if norm in ("オリジナル", "_未分類", "_未分类"):
+            if norm in ("_未分類", "_未分类"):
                 kind = norm
             entries.append({"author": author, "name": name, "kind": kind,
                             "mtime": os.path.getmtime(p)})
@@ -117,7 +117,7 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
     """返回目录下所有图片（每页一张），按 作品ID+页码 排序。
 
     character 非空时扫描 {author}/{series}/{character}/；character 为空时扫描
-    {author}/{series}/ 本身（适配 オリジナル/_未分类 平铺结构）。
+    {author}/{series}/ 本身（适配 _未分类 平铺结构）。
 
     静态图每页一个条目；动图一个条目（id 为 base，type=ugoira）。
     返回项含 author/series/character/file，前端可直接拼 img/thumb URL。

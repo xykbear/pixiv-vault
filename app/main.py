@@ -110,11 +110,11 @@ def api_create_download(req: dict):
     url = (req.get("url") or "").strip()
     series = (req.get("series") or "").strip() or None
     characters = req.get("characters") or []
-    is_original = bool(req.get("is_original"))
+    is_collection = bool(req.get("is_collection"))
     if not url:
         raise HTTPException(400, "缺少 url")
     try:
-        task = downloader.create_task(url, series, characters, is_original)
+        task = downloader.create_task(url, series, characters, is_collection)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return task

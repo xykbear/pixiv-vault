@@ -16,7 +16,7 @@ const state = {
   sortMode: localStorage.getItem('pixiv_sort') || 'date',
   // 查看器
   viewer: null,
-  dlMode: 'tag',        // 'orig' | 'tag'
+  dlMode: 'tag',        // 'collection' | 'tag'
   previewMeta: null,
   selectedTags: [],     // 按点击顺序的已选标签
   tasks: {},            // task_id -> { el: {status, bar, log}, done }
@@ -241,8 +241,8 @@ function renderSeries() {
         <span class="text-gray-300">${ICONS.chevron}</span>
       </button>`;
     }
-    const isFlat = e.kind === 'オリジナル' || e.kind === '_未分類' || e.kind === '_未分类';
-    const label = isFlat ? (e.kind === 'オリジナル' ? 'オリジナル' : '未分类') : '系列';
+    const isFlat = e.kind === '_未分類' || e.kind === '_未分类';
+    const label = isFlat ? '未分类' : '系列';
     const onclick = isFlat ? `loadImages('${esc(e.author)}','${esc(e.name)}')` : `loadCharacters('${esc(e.author)}','${esc(e.name)}')`;
     return `<button onclick="${onclick}"
       class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
@@ -292,7 +292,7 @@ function renderCharacters() {
   }).join('');
 }
 
-// 角色层：直接展示同角色所有图片（平铺网格）；character 为空适配 オリジナル/未分类 平铺
+// 角色层：直接展示同角色所有图片（平铺网格）；character 为空适配 _未分类 平铺
 async function loadImages(author, series, character) {
   const qs = character ? `author=${enc(author)}&series=${enc(series)}&character=${enc(character)}` : `author=${enc(author)}&series=${enc(series)}`;
   const d = await api(`/api/tree/images?${qs}`);
@@ -711,7 +711,7 @@ async function loadServerTasks() {
         url: t.url,
         series: t.series,
         characters: t.characters,
-        is_original: t.is_original,
+        is_collection: t.is_collection,
       });
       // 立即渲染状态/按钮（否则已终结任务会短暂显示失效的取消按钮）
       updateTaskUI(t.task_id, t);
@@ -758,7 +758,7 @@ function renderPreview(p) {
       </div>
       <div class="text-sm font-medium mb-2">归档方式</div>
       <div class="grid grid-cols-2 gap-2 mb-3">
-        <button id="mode-orig" onclick="setDlMode('orig')" class="px-3 py-2 rounded-lg border text-sm border-pixiv-border bg-white text-gray-600">オリジナル</button>
+        <button id="mode-collection" onclick="setDlMode('collection')" class="px-3 py-2 rounded-lg border text-sm border-pixiv-border bg-white text-gray-600">Collection</button>
         <button id="mode-tag" onclick="setDlMode('tag')" class="px-3 py-2 rounded-lg border text-sm bg-pixiv-blue text-white border-pixiv-blue">标签选择</button>
       </div>
       <div id="dl-mode-body">
@@ -777,16 +777,16 @@ function renderPreview(p) {
 function setDlMode(mode) {
   state.dlMode = mode;
   const p = state.previewMeta;
-  const origBtn = $('#mode-orig');
+  const colBtn = $('#mode-collection');
   const tagBtn = $('#mode-tag');
   const body = $('#dl-mode-body');
   const active = 'bg-pixiv-blue text-white border-pixiv-blue';
   const idle = 'border-pixiv-border bg-white text-gray-600';
-  origBtn.className = `px-3 py-2 rounded-lg border text-sm ${mode === 'orig' ? active : idle}`;
+  colBtn.className = `px-3 py-2 rounded-lg border text-sm ${mode === 'collection' ? active : idle}`;
   tagBtn.className = `px-3 py-2 rounded-lg border text-sm ${mode === 'tag' ? active : idle}`;
-  if (mode === 'orig') {
+  if (mode === 'collection') {
     body.innerHTML = `
-      <div class="text-xs text-gray-500 mb-4 bg-pixiv-light rounded-lg p-3">归档到 <span class="font-medium">オリジナル/${esc(p.id)}</span>。若需按系列/角色归档请切换到「标签选择」。</div>`;
+      <div class="text-xs text-gray-500 mb-4 bg-pixiv-light rounded-lg p-3">归档到 <span class="font-medium">Collections/${esc(p.id)}_${esc(p.title)}</span>。用于无系列/无正式名称角色（网络热梗、原创角色等）。若需按系列/角色归档请切换到「标签选择」。</div>`;
   } else {
     body.innerHTML = `
       <div class="text-xs text-gray-500 mb-2">点击标签选择：首个 = 系列，其余 = 角色；「无系列」表示不设系列</div>
@@ -859,10 +859,10 @@ function startDownload(workId, opts = {}) {
   const url = opts.url !== undefined ? opts.url : $('#dl-url').value.trim();
   let series = opts.series !== undefined ? opts.series : null;
   let characters = opts.characters !== undefined ? opts.characters : [];
-  let isOrig = opts.is_original !== undefined ? opts.is_original : false;
+  let isCollection = opts.is_collection !== undefined ? opts.is_collection : false;
   if (opts.url === undefined) {
-    if (state.dlMode === 'orig') {
-      isOrig = true;
+    if (state.dlMode === 'collection') {
+      isCollection = true;
     } else {
       const c = classifyPicked();
       series = c.series; characters = c.characters;
@@ -873,7 +873,7 @@ function startDownload(workId, opts = {}) {
   api('/api/download', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, series, characters, is_original: isOrig })
+    body: JSON.stringify({ url, series, characters, is_collection: isCollection })
   }).then(task => {
     // 清空输入框并重置预览区域（仅 UI 发起时）
     if (opts.url === undefined) {
@@ -884,7 +884,7 @@ function startDownload(workId, opts = {}) {
       if (r) r.innerHTML = '';
     }
     if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
-    showTask(task, { url, series, characters, is_original: isOrig });
+    showTask(task, { url, series, characters, is_collection: isCollection });
   }).catch(err => {
     if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
     alert('下载任务创建失败: ' + err.message);
@@ -941,17 +941,12 @@ async function pollAllTasks() {
       const t = await api('/api/download/' + id);
       updateTaskUI(id, t);
     } catch (e) {
-      // 任务不存在则标记为已移除，并提供清除按钮
+      // 任务不存在则自动清除
       const e2 = state.tasks[id];
-      if (e2 && e2.statusEl) e2.statusEl.textContent = '已移除';
-      if (e2) e2.done = true;
-      if (e2 && e2.actionsEl && !e2.clearBtn) {
-        const btn = document.createElement('button');
-        btn.className = 'px-3 py-1.5 rounded border border-gray-300 text-gray-500 text-xs';
-        btn.textContent = '清除';
-        btn.onclick = () => clearTask(id);
-        e2.actionsEl.appendChild(btn);
-        e2.clearBtn = btn;
+      if (e2) {
+        const div = divOf(e2);
+        if (div) div.remove();
+        delete state.tasks[id];
       }
     }
   }
@@ -975,18 +970,10 @@ function updateTaskUI(id, t) {
   }
   if (t.status === 'done' || t.status === 'error' || t.status === 'cancelled') {
     entry.done = true;
-    // 终结状态隐藏取消按钮（任务已结束，无法取消），显示「清除」
+    // 终结状态隐藏取消按钮（任务已结束，无法取消）
     const cancelBtn = divOf(entry).querySelector('.task-cancel');
     if (cancelBtn) cancelBtn.remove();
-    if (!entry.clearBtn) {
-      const btn = document.createElement('button');
-      btn.className = 'px-3 py-1.5 rounded border border-gray-300 text-gray-500 text-xs';
-      btn.textContent = '清除';
-      btn.onclick = () => clearTask(id);
-      entry.actionsEl.appendChild(btn);
-      entry.clearBtn = btn;
-    }
-    // 失败时显示「重试」按钮
+    // 失败时显示「重试」按钮（点击重试会清除原任务）
     if (t.status === 'error' && entry.meta && entry.meta.url) {
       if (!entry.retryBtn) {
         const btn = document.createElement('button');
@@ -996,6 +983,10 @@ function updateTaskUI(id, t) {
         entry.actionsEl.appendChild(btn);
         entry.retryBtn = btn;
       }
+    }
+    // 下载完成（done）自动清除；错误/取消保留供查看/重试
+    if (t.status === 'done') {
+      setTimeout(() => clearTask(id), 2500);
     }
   }
 }
@@ -1023,6 +1014,12 @@ function divOf(entry) {
 }
 
 function retryTask(meta) {
+  // 找到原任务并清除（服务端 DELETE + 本地移除），然后重新下载
+  const id = state.tasks && Object.keys(state.tasks).find(k => {
+    const e = state.tasks[k];
+    return e && e.meta === meta;
+  });
+  if (id) clearTask(id);
   const m = meta.url.match(/(?:artworks|illust)\/(\d+)/);
   const wid = m ? m[1] : '';
   startDownload(wid, meta);

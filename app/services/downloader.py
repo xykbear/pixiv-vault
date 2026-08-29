@@ -20,7 +20,7 @@ MAX_CONCURRENT = int(os.environ.get("PIXIV_MAX_CONCURRENT", "2"))
 _SEM = threading.Semaphore(MAX_CONCURRENT)
 
 _SAFE = re.compile(r'[/\\:*?"<>|]')
-SERIES_DIRS = ("オリジナル", "_未分類", "_未分类", "_meta_skip")
+SERIES_DIRS = ("_未分類", "_未分类", "_meta_skip")
 
 
 def _safe(s: str) -> str:
@@ -36,13 +36,18 @@ def safe_author_dir(user_name: str) -> str:
     return _safe(user_name)
 
 
-def target_path(author: str, series: str | None, characters: list | None, is_original: bool = False) -> str:
-    """计算归档相对路径（相对 pixiv/ 根）。"""
+def target_path(author: str, series: str | None, characters: list | None, is_collection: bool = False, work_id: str = "", title: str = "") -> str:
+    """计算归档相对路径（相对 pixiv/ 根）。
+
+    is_collection: 无系列/无正式名称角色 → Collections/{id}_{title}。
+    series/characters 为空且非 collection → _未分類（webapp 暂存，待治理）。
+    """
     a = safe_author_dir(author)
     series = (series or "").strip()
     characters = [c.strip() for c in (characters or []) if c and c.strip()]
-    if is_original:
-        return os.path.join(a, "オリジナル", "")
+    if is_collection:
+        t = _safe(title)[:60] if (title or "").strip() else "無題"
+        return os.path.join(a, "Collections", f"{work_id}_{t}")
     if series:
         s = _safe(series)
         if characters:
@@ -154,7 +159,7 @@ def _download_ugoira(task: dict, client, body, dest_dir: str, base: str) -> None
         task["log"].append(f"动图 {work_id} 完成：{len(frames)} 帧")
 
 
-def create_task(url: str, series: str | None, characters: list | None, is_original: bool = False) -> dict:
+def create_task(url: str, series: str | None, characters: list | None, is_collection: bool = False) -> dict:
     """创建下载任务并后台执行。"""
     kind, work_id = pixiv_client.parse_link(url)
     if kind != "work":
@@ -171,7 +176,7 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
         "log": [],
         "series": series or "",
         "characters": characters or [],
-        "is_original": is_original,
+        "is_collection": is_collection,
         "error": "",
         "target": "",
     }
@@ -191,14 +196,16 @@ def create_task(url: str, series: str | None, characters: list | None, is_origin
                 author = body.get("userName") or "unknown"
                 if task["type"] == "ugoira":
                     base = work_id
-                    rel = target_path(author, series, characters, is_original)
+                    rel = target_path(author, series, characters, is_collection,
+                                      work_id=work_id, title=body.get("title", ""))
                     dest_dir = os.path.join(_root(), rel)
                     _download_ugoira(task, client, body, dest_dir, base)
                     task["target"] = rel
                 else:
                     urls = pixiv_client.work_original_urls(
                         body, pixiv_client.get_pages(work_id, client))
-                    rel = target_path(author, series, characters, is_original)
+                    rel = target_path(author, series, characters, is_collection,
+                                      work_id=work_id, title=body.get("title", ""))
                     dest_dir = os.path.join(_root(), rel)
                     _download_static(task, client, body, urls, dest_dir)
                     task["target"] = rel
