@@ -18,6 +18,10 @@ _LOCK = threading.Lock()
 # 并发下载限制：同时最多 N 个下载线程，避免 Pixiv 风控/带宽争抢
 MAX_CONCURRENT = int(os.environ.get("PIXIV_MAX_CONCURRENT", "2"))
 _SEM = threading.Semaphore(MAX_CONCURRENT)
+# 下载完成登记 log（生产端）：done 时追加一条到 {root}/.webapp_downloads.log（单文件），
+# 供治理端 sync_webapp_logs 消费（生产→processing 闭环）。环境变量控制（默认关）。
+_WEBAPP_LOG = os.environ.get("PIXIV_WEBAPP_LOG", "").strip().lower() in ("1", "true", "yes")
+_WEBAPP_LOG_FILE = os.environ.get("PIXIV_WEBAPP_LOG_FILE", "")
 
 _SAFE = re.compile(r'[/\\:*?"<>|]')
 SERIES_DIRS = ("_未分類", "_未分类", "_meta_skip")
@@ -30,6 +34,31 @@ def _safe(s: str) -> str:
 
 def _root() -> str:
     return config.get_root()
+
+
+def _log_file() -> str:
+    """登记 log 单文件：归档根下 .webapp_downloads.log（与治理端约定，. 前缀不被扫盘）。"""
+    return _WEBAPP_LOG_FILE or os.path.join(config.get_root(), ".webapp_downloads.log")
+
+
+def _log_done(task: dict, author_dir: str, target_rel: str) -> None:
+    """下载完成登记：追加 JSONL 到单文件（sync 消费后整体删除）。"""
+    if not _WEBAPP_LOG:
+        return
+    try:
+        os.makedirs(config.get_root(), exist_ok=True)
+        rec = {
+            "work_id": str(task["work_id"]),
+            "author": author_dir,
+            "target": target_rel,
+            "series": task.get("series") or "",
+            "characters": task.get("characters") or [],
+            "is_collection": bool(task.get("is_collection")),
+        }
+        with open(_log_file(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # 登记失败静默（log 是辅助信号，不影响下载结果）
 
 
 def safe_author_dir(user_name: str) -> str:
@@ -213,6 +242,8 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                 if task["status"] != "cancelled":
                     task["status"] = "done"
                     task["progress"] = task["total"] or task["progress"]
+                    author_dir = safe_author_dir(author)
+                    _log_done(task, author_dir, rel)
             except Exception as e:
                 if task["status"] != "cancelled":
                     task["status"] = "error"

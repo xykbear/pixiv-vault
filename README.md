@@ -61,6 +61,7 @@ data/
 
 - **代理**：Web 设置页配置，写入 `config.yaml`，实时生效（无需重启）。代理仅用于访问 Pixiv 下载，与系统/Git 代理无关
 - **并发下载数**：环境变量 `PIXIV_MAX_CONCURRENT`（默认 2）
+- **下载登记 log**：环境变量 `PIXIV_WEBAPP_LOG=1` 开启后，每次下载完成（done）追加一条到 `.webapp_downloads.log`（单文件，JSONL，含作品 ID/作者/目标路径），供外部治理端 `sync_webapp_logs` 消费登记（生产→processing 闭环，同步后整文件清除）。默认关，部署侧按需开启
 - **cookies**：`config.yaml` 的 `cookies_file` 指定（默认相对数据根的 `cookies.txt`）
 - **任务存储**：下载任务存内存（`_TASKS`），重启即清空，不持久化
 
