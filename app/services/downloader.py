@@ -86,6 +86,46 @@ def target_path(author: str, series: str | None, characters: list | None, is_col
     return os.path.join(a, "_未分類", "")
 
 
+def find_existing_download(author: str, work_id: str, series: str | None = None,
+                           is_collection: bool = False) -> str | None:
+    """下载前查重：该作者目录下 `work_id` 是否已存在，返回已存在的相对路径。
+
+    痛点：磁盘混杂治理不同状态（角色别名目录、_未分類、Collections 等），
+    幂等检查只查目标目录会失效——同作品可能已落在同系列的别名角色目录等。
+
+    查重范围（同作者内）：
+      - series 给定（下载到 {作者}/{系列}/X）→ 只扫 {作者}/{系列}/ 下全部
+        （角色目录/_未分類/平铺），避免跨系列误判不同作品
+      - is_collection 或 series 空 → 扫整个 {作者}/（Collections/未分类含该作）
+
+    判定：目录内存在 {work_id}.meta.json 或 {work_id}.zip/{work_id}_p0.gif
+    （动图兼容）。只 os.listdir 目录项 + exists，不读内容。
+    """
+    work_id = str(work_id)
+    author_dir = safe_author_dir(author)
+    base = os.path.join(_root(), author_dir)
+    if not os.path.isdir(base):
+        return None
+    if series and not is_collection:
+        roots = [os.path.join(base, _safe(series))]
+    else:
+        # Collections/无系列：扫整个作者目录（含 Collections、各系列、_未分類）
+        roots = [base]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dp, _ds, _fs in os.walk(root):
+            if ".thumbs" in dp or os.path.basename(dp).startswith("."):
+                continue
+            if os.path.exists(os.path.join(dp, f"{work_id}.meta.json")):
+                return os.path.relpath(dp, _root())
+            # 动图兼容：无 meta 时按 zip/gif 判定
+            if os.path.exists(os.path.join(dp, f"{work_id}.zip")) or \
+               os.path.exists(os.path.join(dp, f"{work_id}_p0.gif")):
+                return os.path.relpath(dp, _root())
+    return None
+
+
 def preview(work_id: str) -> dict:
     """预览作品 meta + 标签（含原创特殊标签）。"""
     client = config.make_httpx_client()
@@ -223,18 +263,28 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                 task["type"] = "ugoira" if body.get("illustType") == 2 else "static"
                 task["log"].append(f"作品: {body.get('title')} by {body.get('userName')}")
                 author = body.get("userName") or "unknown"
+                rel = target_path(author, series, characters, is_collection,
+                                  work_id=work_id, title=body.get("title", ""))
+                # 同作者查重：磁盘可能已存在该作品（别名角色目录/同系列其他目录/
+                # _未分類/Collections），只查目标目录会重复下载落盘（治理状态混杂）
+                existing = find_existing_download(author, work_id, series, is_collection)
+                if existing:
+                    task["target"] = rel
+                    task["log"].append(f"跳过：作品 {work_id} 已存在于 "
+                                       f"{existing}（无需重复下载）")
+                    if task["status"] != "cancelled":
+                        task["status"] = "done"
+                        task["progress"] = task["total"] or task["progress"]
+                        # log 指向实际存在位置（供 sync 登记治理，不登记到空目标路径）
+                        _log_done(task, safe_author_dir(author), existing)
+                    return
                 if task["type"] == "ugoira":
-                    base = work_id
-                    rel = target_path(author, series, characters, is_collection,
-                                      work_id=work_id, title=body.get("title", ""))
                     dest_dir = os.path.join(_root(), rel)
-                    _download_ugoira(task, client, body, dest_dir, base)
+                    _download_ugoira(task, client, body, dest_dir, work_id)
                     task["target"] = rel
                 else:
                     urls = pixiv_client.work_original_urls(
                         body, pixiv_client.get_pages(work_id, client))
-                    rel = target_path(author, series, characters, is_collection,
-                                      work_id=work_id, title=body.get("title", ""))
                     dest_dir = os.path.join(_root(), rel)
                     _download_static(task, client, body, urls, dest_dir)
                     task["target"] = rel
