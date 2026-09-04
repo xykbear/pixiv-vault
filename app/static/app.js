@@ -12,6 +12,8 @@ const state = {
   breadcrumb: [],
   scrollPosByLevel: {},  // 每层滚动位置（0=作者 1=系列 2=角色 3=图片），面包屑返回时恢复
   curLevel: 0,         // 0=作者 1=系列 2=角色 3=图片
+  searchMode: false,   // true=内容区显示全库搜索结果（Enter 触发）；false=层级内过滤
+  searchQuery: '',
   // 排序（localStorage 持久化）
   sortMode: localStorage.getItem('pixiv_sort') || 'date',
   // 查看器
@@ -83,7 +85,7 @@ function browseShell() {
         <div class="flex gap-2">
           <div class="relative flex-1">
             <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">${ICONS.search}</span>
-            <input id="search" type="search" placeholder="搜索" autocomplete="off"
+            <input id="search" type="search" placeholder="${state.curLevel === 0 ? '搜索作者（回车全库找角色）' : '搜索（回车全库找角色）'}" autocomplete="off"
               class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
           </div>
           ${state.curLevel < 3 ? `
@@ -100,6 +102,7 @@ function browseShell() {
 }
 
 async function renderBrowse() {
+  resetSearch();
   state.curLevel = 0;
   state.breadcrumb = [];
   if (state.authors.length === 0) {
@@ -116,14 +119,111 @@ async function renderBrowse() {
 
 function bindSearch() {
   const s = $('#search');
-  if (s) s.addEventListener('input', filterCurrent);
+  if (s) {
+    s.addEventListener('input', filterCurrent);
+    s.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.target.value || '').trim()) {
+        e.preventDefault();
+        doGlobalSearch((e.target.value || '').trim());
+      }
+    });
+  }
 }
 
+// 跨作者搜索：按角色/系列名全库匹配（backend 内存索引，首次触发后台构建）。
+// 结果展示在内容区，点条目深链到 {作者}/{系列}/{角色} 图片层。
+let _searchPoll = null;
+
+async function doGlobalSearch(q) {
+  if (_searchPoll) { clearTimeout(_searchPoll); _searchPoll = null; }
+  if (_globalDebounce) { clearTimeout(_globalDebounce); _globalDebounce = null; }
+  state.searchMode = true;       // 内容区显示搜索结果而非层级列表
+  state.searchQuery = q;
+  renderSearchLoading();
+  await searchOnce(q);
+}
+
+async function searchOnce(q) {
+  let d;
+  try { d = await api(`/api/search?q=${enc(q)}&limit=200`); }
+  catch (e) { renderSearchError(String(e)); return; }
+  if (d.state !== 'ready') {
+    // 索引构建中：轮询 status，就绪后重试
+    renderSearchLoading('正在构建全库索引（首次需约 20s）…');
+    _searchPoll = setTimeout(() => { if (state.searchMode) searchOnce(q); }, 1500);
+    return;
+  }
+  renderSearchResults(q, d.results);
+}
+
+function renderSearchLoading(msg) {
+  const content = $('#content');
+  if (!content) return;
+  content.innerHTML = `<div class="text-center text-gray-400 py-16 text-sm fade-in">
+    <div class="inline-block w-8 h-8 border-2 border-pixiv-blue border-t-transparent rounded-full animate-spin mb-3"></div>
+    <div>${msg || '搜索中…'}</div></div>`;
+}
+
+function renderSearchError(msg) {
+  const content = $('#content');
+  if (!content) return;
+  content.innerHTML = empty('搜索失败: ' + msg);
+}
+
+function renderSearchResults(q, results) {
+  const content = $('#content');
+  if (!content) return;
+  const header = results.length
+    ? `<div class="text-xs text-gray-400 mb-2">“${esc(q)}” 全库命中 ${results.length} 个角色/系列</div>`
+    : `<div class="text-xs text-gray-400 mb-2">“${esc(q)}” 无跨作者命中（可在当前层内继续筛选）</div>`;
+  const rows = results.map(r => `
+    <button onclick="jumpToChar('${esc(r.author)}','${esc(r.series)}','${esc(r.character)}')"
+      class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
+      <div class="w-10 h-10 rounded-md bg-pixiv-light text-pixiv-blue flex items-center justify-center shrink-0">${ICONS.image}</div>
+      <div class="flex-1 min-w-0">
+        <div class="font-medium truncate">${esc(r.character)}</div>
+        <div class="text-xs text-gray-400 truncate">${esc(r.author)} › ${esc(r.series)}</div>
+      </div>
+      <span class="text-gray-300 shrink-0">${ICONS.chevron}</span>
+    </button>`).join('');
+  content.innerHTML = `<div class="fade-in">${header}<div>${rows}</div></div>`;
+}
+
+// 搜索结果深链：进入 {作者}/{系列}/{角色} 图片层（面包屑随新导航重建）
+function jumpToChar(author, series, character) {
+  loadImages(author, series, character);
+}
+
+// 层级导航时重置搜索状态（避免残留的全库查询过滤新层级列表）
+function resetSearch() {
+  state.searchMode = false;
+  state.searchQuery = '';
+}
+
+let _globalDebounce = null;
+
 function filterCurrent() {
+  if (state.searchMode) {
+    const q = query();
+    if (!q) { renderEmptySearch(); return; }
+    // 全库搜索输入防抖（回车是主触发；打字改词时 400ms 后自动重搜）
+    if (_globalDebounce) clearTimeout(_globalDebounce);
+    _globalDebounce = setTimeout(() => {
+      renderSearchLoading();
+      doGlobalSearch(q);
+    }, 400);
+    return;
+  }
   if (state.curLevel === 0) renderAuthors();
   else if (state.curLevel === 1) renderSeries();
   else if (state.curLevel === 2) renderCharacters();
   else if (state.curLevel === 3) renderImages();
+}
+
+function renderEmptySearch() {
+  const content = $('#content');
+  if (!content) return;
+  content.innerHTML = empty('输入关键词后按回车，跨作者搜索角色/系列');
 }
 
 function query() {
@@ -143,7 +243,8 @@ function navCrumb(i) {
   const target = state.breadcrumb.slice(0, i);
   state.breadcrumb = target;
   state.curLevel = i;
-  // 面包屑返回：清空搜索框，用缓存数据渲染对应层，恢复该层滚动位置
+  // 面包屑返回：重置搜索状态，用缓存数据渲染对应层，恢复该层滚动位置
+  resetSearch();
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
@@ -216,6 +317,7 @@ async function loadSeries(author) {
   state.breadcrumb = [author];
   state.curLevel = 1;
   state.scrollPosByLevel[1] = 0;
+  resetSearch();
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
@@ -262,6 +364,7 @@ async function loadCharacters(author, series) {
   state.breadcrumb = [author, series];
   state.curLevel = 2;
   state.scrollPosByLevel[2] = 0;
+  resetSearch();
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();
@@ -300,6 +403,7 @@ async function loadImages(author, series, character) {
   state.breadcrumb = character ? [author, series, character] : [author, series];
   state.curLevel = 3;
   state.scrollPosByLevel[3] = 0;
+  resetSearch();
   app.innerHTML = browseShell();
   bindSearch();
   renderBreadcrumb();

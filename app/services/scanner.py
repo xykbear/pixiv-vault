@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import threading
 import unicodedata
 
 from .. import config
@@ -202,3 +203,138 @@ def list_works(author: str, series: str, character: str) -> list[dict]:
             "has_thumb": True,
         })
     return sorted(result, key=lambda x: x["id"], reverse=True)
+
+
+# ---------- 跨作者搜索索引（进程内缓存目录树，无建库） ----------
+#
+# 痛点：找角色须先记得作者。方案：后台线程构建 作者→系列→角色 目录树
+# （只 os.listdir 目录名，不读 meta/图），缓存进程内；搜索在内存过滤。
+# NAS 全库列目录名实测 ~19s（冷），后台线程构建避免阻塞搜索请求。
+# 失效：新下载/移动会新增目录，索引滞后；每次搜索前轻量检测顶层作者
+# mtime 签名，变化即触发后台重建（旧索引可用期间继续响应）。
+
+_INDEX_LOCK = threading.Lock()
+_INDEX = None            # [{author, series, character, nfile}] 或 None
+_INDEX_SIG = None        # 构建时顶层 {author_dir: mtime} 签名
+_INDEX_STATE = "empty"   # empty | building | ready
+_SEARCH_CACHE = {}       # q -> 结果（节流用，避免重复遍历）
+
+
+def _norm(s: str) -> str:
+    """NFKC 归一 + 小写（全半角/大小写模糊匹配）。"""
+    return unicodedata.normalize("NFKC", s or "").lower()
+
+
+def _top_signature() -> dict:
+    """顶层作者目录签名 {author_dir: mtime}（轻量，~0.2s NAS）。"""
+    root = config.get_root()
+    sig = {}
+    try:
+        for name in os.listdir(root):
+            p = os.path.join(root, name)
+            if os.path.isdir(p) and not name.startswith("."):
+                try:
+                    sig[name] = os.path.getmtime(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return sig
+
+
+def _build_index():
+    """全库遍历目录树（3 层），只列目录名不读内容。返回条目列表 + 顶层签名。"""
+    root = config.get_root()
+    entries = []
+    sig = _top_signature()
+    for author in sorted(sig):
+        ap = os.path.join(root, author)
+        for series in sorted(os.listdir(ap)):
+            if series.startswith("."):
+                continue
+            sp = os.path.join(ap, series)
+            if not os.path.isdir(sp):
+                continue
+            if series in ("_meta_skip", "Collections"):
+                continue
+            if _norm(series) in ("_未分類", "_未分类"):
+                continue
+            # 系列层本身也可能是平铺作品目录（无角色子目录）→ 不作为条目
+            for char in sorted(os.listdir(sp)):
+                if char.startswith("."):
+                    continue
+                cp = os.path.join(sp, char)
+                if not os.path.isdir(cp):
+                    continue
+                if _norm(char) in ("_未分類", "_未分类", "_meta_skip"):
+                    continue
+                try:
+                    nf = len(os.listdir(cp))
+                except OSError:
+                    nf = 0
+                entries.append({
+                    "author": author, "series": series,
+                    "character": char, "nfile": nf,
+                })
+    return entries, sig
+
+
+def _build_worker():
+    """后台重建索引线程体（重建完成后置 ready）。"""
+    global _INDEX, _INDEX_SIG, _INDEX_STATE
+    try:
+        entries, sig = _build_index()
+        with _INDEX_LOCK:
+            _INDEX = entries
+            _INDEX_SIG = sig
+            _INDEX_STATE = "ready"
+    except Exception:
+        with _INDEX_LOCK:
+            _INDEX_STATE = "empty"
+
+
+def _start_build():
+    """启动后台重建（防重复）。调用方须已持锁或确认可安全建。"""
+    global _INDEX_STATE
+    if _INDEX_STATE == "building":
+        return False
+    _INDEX_STATE = "building"
+    threading.Thread(target=_build_worker, daemon=True).start()
+    return True
+
+
+def ensure_index():
+    """确保索引就绪：空则触发后台构建；顶层签名变化则后台重建。
+
+    返回状态：empty(首次触发中) | building | ready。ready 且顶层未变时
+    索引可直接用于内存搜索（搜索本身零 NAS 开销）。
+    """
+    global _INDEX_STATE
+    with _INDEX_LOCK:
+        if _INDEX_STATE == "building":
+            return _INDEX_STATE
+        if _INDEX_STATE == "ready" and _INDEX is not None:
+            # 轻量探测顶层是否变化（新下载/新作者 → 目录 mtime 变）
+            if _top_signature() == _INDEX_SIG:
+                return "ready"
+            _start_build()  # 顶层已变：占位 building + 后台重建
+            return "building"
+    # empty：首次触发
+    _start_build()
+    return _INDEX_STATE
+
+
+def search_index(q: str, limit: int = 200):
+    """跨作者搜索角色/系列（内存过滤，无 NAS 读）。返回命中列表。"""
+    key = _norm(q)
+    if not key:
+        return []
+    with _INDEX_LOCK:
+        entries = _INDEX or []
+    hits = []
+    for e in entries:
+        if key in _norm(e["character"]) or key in _norm(e["series"]):
+            hits.append(e)
+            if len(hits) >= limit:
+                break
+    return hits
