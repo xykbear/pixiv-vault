@@ -88,12 +88,12 @@ function browseShell() {
             <input id="search" type="search" placeholder="${state.curLevel === 0 ? '搜索作者（回车全库找角色）' : '搜索（回车全库找角色）'}" autocomplete="off"
               class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
           </div>
-          ${state.curLevel < 3 ? `
+          ${!state.searchMode && state.curLevel < 3 ? `
           <button id="sort-btn" onclick="toggleSort()" title="切换排序"
             class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-xs text-gray-500 shrink-0">
             ${state.sortMode === 'date' ? '按日期' : '按名称'}
           </button>` : ''}
-          <button onclick="refreshLevel()" title="刷新当前层"
+          <button onclick="refreshLevel()" title="刷新${state.searchMode ? '搜索结果' : '当前层'}"
             class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-gray-500 shrink-0">${ICONS.refresh}</button>
         </div>
       </div>
@@ -139,18 +139,23 @@ async function doGlobalSearch(q) {
   if (_globalDebounce) { clearTimeout(_globalDebounce); _globalDebounce = null; }
   state.searchMode = true;       // 内容区显示搜索结果而非层级列表
   state.searchQuery = q;
+  const sb = $('#sort-btn');
+  if (sb) sb.style.display = 'none';   // 排序仅对层级列表有意义，搜索态隐藏
   renderSearchLoading();
   await searchOnce(q);
 }
 
-async function searchOnce(q) {
+async function searchOnce(q, attempt = 0) {
   let d;
   try { d = await api(`/api/search?q=${enc(q)}&limit=200`); }
   catch (e) { renderSearchError(String(e)); return; }
   if (d.state !== 'ready') {
-    // 索引构建中：轮询 status，就绪后重试
+    if (attempt >= 40) {  // ~60s 上限，NAS 持续不可读时避免无限轮询
+      renderSearchError('索引构建超时（NAS 不可读？），稍后重试');
+      return;
+    }
     renderSearchLoading('正在构建全库索引（首次需约 20s）…');
-    _searchPoll = setTimeout(() => { if (state.searchMode) searchOnce(q); }, 1500);
+    _searchPoll = setTimeout(() => { if (state.searchMode) searchOnce(q, attempt + 1); }, 1500);
     return;
   }
   renderSearchResults(q, d.results);
@@ -255,8 +260,13 @@ function navCrumb(i) {
   requestAnimationFrame(() => window.scrollTo(0, state.scrollPosByLevel[i] || 0));
 }
 
-// 刷新当前层数据（不依赖浏览器缓存，重新拉取）
+// 刷新当前层数据（不依赖浏览器缓存，重新拉取）；搜索态下重跑全库搜索
 async function refreshLevel() {
+  if (state.searchMode) {
+    const q = query();
+    if (q) { renderSearchLoading(); await doGlobalSearch(q); }
+    return;
+  }
   const i = state.curLevel;
   const keep = state.scrollPosByLevel[i] || 0;
   if (i === 0) {

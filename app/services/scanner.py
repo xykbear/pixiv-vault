@@ -217,7 +217,22 @@ _INDEX_LOCK = threading.Lock()
 _INDEX = None            # [{author, series, character, nfile}] 或 None
 _INDEX_SIG = None        # 构建时顶层 {author_dir: mtime} 签名
 _INDEX_STATE = "empty"   # empty | building | ready
-_SEARCH_CACHE = {}       # q -> 结果（节流用，避免重复遍历）
+
+
+def notify_change(author_dir: str) -> None:
+    """标记某作者目录已变化（下载落盘后调用），触发下次搜索前索引重建。
+
+    顶层签名只含作者目录 mtime，而新增**角色**目录（已有系列下）不会冒泡到
+    作者目录 mtime——webapp 下载到已存在系列下的新角色时索引会陈旧。
+    调用方（downloader 写盘后）显式 os.utime 作者目录，使签名检测到变化。
+    """
+    root = config.get_root()
+    p = os.path.join(root, author_dir)
+    try:
+        if os.path.isdir(p):
+            os.utime(p, None)  # mtime 置当前时间 → 顶层签名变化
+    except OSError:
+        pass
 
 
 def _norm(s: str) -> str:
@@ -226,19 +241,20 @@ def _norm(s: str) -> str:
 
 
 def _top_signature() -> dict:
-    """顶层作者目录签名 {author_dir: mtime}（轻量，~0.2s NAS）。"""
+    """顶层作者目录签名 {author_dir: mtime}（轻量，~0.2s NAS）。
+
+    根目录不可读/不存在时抛 OSError（调用方区分"空库"与"读失败"——NAS 断连
+    不应静默产出空索引置 ready 让搜索误报无命中，review A6）。
+    """
     root = config.get_root()
     sig = {}
-    try:
-        for name in os.listdir(root):
-            p = os.path.join(root, name)
-            if os.path.isdir(p) and not name.startswith("."):
-                try:
-                    sig[name] = os.path.getmtime(p)
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    for name in os.listdir(root):
+        p = os.path.join(root, name)
+        if os.path.isdir(p) and not name.startswith(".") and name != "_meta_skip":
+            try:
+                sig[name] = os.path.getmtime(p)
+            except OSError:
+                pass  # 单目录 stat 失败跳过（其余继续）
     return sig
 
 
@@ -325,16 +341,22 @@ def ensure_index():
 
 
 def search_index(q: str, limit: int = 200):
-    """跨作者搜索角色/系列（内存过滤，无 NAS 读）。返回命中列表。"""
+    """跨作者搜索角色/系列（内存过滤，无 NAS 读）。返回命中列表。
+
+    相关性排序：精确命中（角色/系列名 == 关键词）优先，其余子串命中次之，
+    避免常见短词的精确命中被淹没（review A4）。截断到 limit。
+    """
     key = _norm(q)
     if not key:
         return []
     with _INDEX_LOCK:
         entries = _INDEX or []
-    hits = []
+    exact = []
+    fuzzy = []
     for e in entries:
-        if key in _norm(e["character"]) or key in _norm(e["series"]):
-            hits.append(e)
-            if len(hits) >= limit:
-                break
-    return hits
+        ec = _norm(e["character"])
+        es = _norm(e["series"])
+        if key in ec or key in es:
+            rank = 0 if (ec == key or es == key) else 1
+            (exact if rank == 0 else fuzzy).append(e)
+    return (exact + fuzzy)[:limit]

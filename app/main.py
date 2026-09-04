@@ -51,18 +51,12 @@ def api_images(author: str, series: str, character: str = ""):
 
 # ---------- 跨作者搜索 ----------
 
-@app.get("/api/search/status")
-def api_search_status():
-    """索引构建状态：empty | building | ready。前端据此轮询。"""
-    return {"state": scanner.ensure_index()}
-
-
 @app.get("/api/search")
 def api_search(q: str, limit: int = 200):
     """跨作者搜索角色/系列。首次调用触发后台索引构建，返回 {state, results}。
 
-    state=ready 时 results 为命中（按 author/series/character 去重聚合），
-    state=building 时 results 空（前端轮询 status 后重试）。
+    state=ready 时 results 为命中；state=building/empty 时 results 空（索引
+    构建中/失败，前端轮询重试）。
     """
     state = scanner.ensure_index()
     if state != "ready":

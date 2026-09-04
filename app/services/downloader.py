@@ -10,7 +10,7 @@ import time
 import uuid
 
 from .. import config
-from . import pixiv_client
+from . import pixiv_client, scanner as _scanner
 
 # 任务存储：{task_id: {...}}
 _TASKS: dict[str, dict] = {}
@@ -86,43 +86,36 @@ def target_path(author: str, series: str | None, characters: list | None, is_col
     return os.path.join(a, "_未分類", "")
 
 
-def find_existing_download(author: str, work_id: str, series: str | None = None,
-                           is_collection: bool = False) -> str | None:
-    """下载前查重：该作者目录下 `work_id` 是否已存在，返回已存在的相对路径。
+def find_existing_download(author: str, work_id: str) -> str | None:
+    """下载前查重：该作者目录下 `work_id` 是否已完整存在，返回已存在的相对路径。
 
-    痛点：磁盘混杂治理不同状态（角色别名目录、_未分類、Collections 等），
-    幂等检查只查目标目录会失效——同作品可能已落在同系列的别名角色目录等。
+    痛点：磁盘混杂治理不同状态（角色别名目录、同系列其他目录、_未分類、
+    Collections 等），幂等检查只查目标目录会失效——同作品可能已落在别处。
 
-    查重范围（同作者内）：
-      - series 给定（下载到 {作者}/{系列}/X）→ 只扫 {作者}/{系列}/ 下全部
-        （角色目录/_未分類/平铺），避免跨系列误判不同作品
-      - is_collection 或 series 空 → 扫整个 {作者}/（Collections/未分类含该作）
+    查重范围 = **整个作者目录**（work_id 全局唯一，同作者下出现在任何子目录
+    都是同一作品；收窄到同系列会漏掉跨系列/Collections/_未分類的已有副本，
+    造成重复落盘）。系列收窄不成立（见 7fa3fd3 审查 B1）。
 
-    判定：目录内存在 {work_id}.meta.json 或 {work_id}.zip/{work_id}_p0.gif
-    （动图兼容）。只 os.listdir 目录项 + exists，不读内容。
+    完整性判定（与 _download_* 自身口径一致）：存在 **size>0** 的
+    {work_id}.meta.json 或 {work_id}.zip（动图）。截断/空文件不视为已存在，
+    避免损坏文件永不修复。只 listdir + stat，不读内容。
     """
     work_id = str(work_id)
     author_dir = safe_author_dir(author)
     base = os.path.join(_root(), author_dir)
     if not os.path.isdir(base):
         return None
-    if series and not is_collection:
-        roots = [os.path.join(base, _safe(series))]
-    else:
-        # Collections/无系列：扫整个作者目录（含 Collections、各系列、_未分類）
-        roots = [base]
-    for root in roots:
-        if not os.path.isdir(root):
+    for dp, _ds, _fs in os.walk(base):
+        if ".thumbs" in dp or os.path.basename(dp).startswith("."):
             continue
-        for dp, _ds, _fs in os.walk(root):
-            if ".thumbs" in dp or os.path.basename(dp).startswith("."):
-                continue
-            if os.path.exists(os.path.join(dp, f"{work_id}.meta.json")):
-                return os.path.relpath(dp, _root())
-            # 动图兼容：无 meta 时按 zip/gif 判定
-            if os.path.exists(os.path.join(dp, f"{work_id}.zip")) or \
-               os.path.exists(os.path.join(dp, f"{work_id}_p0.gif")):
-                return os.path.relpath(dp, _root())
+        # meta（静态/动图都写）须存在且非空
+        mp = os.path.join(dp, f"{work_id}.meta.json")
+        if os.path.isfile(mp) and os.path.getsize(mp) > 0:
+            return os.path.relpath(dp, _root())
+        # 动图兼容：zip 已下且非空（meta 可能滞后，zip 是图完整性关键）
+        zp = os.path.join(dp, f"{work_id}.zip")
+        if os.path.isfile(zp) and os.path.getsize(zp) > 0:
+            return os.path.relpath(dp, _root())
     return None
 
 
@@ -265,16 +258,18 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                 author = body.get("userName") or "unknown"
                 rel = target_path(author, series, characters, is_collection,
                                   work_id=work_id, title=body.get("title", ""))
-                # 同作者查重：磁盘可能已存在该作品（别名角色目录/同系列其他目录/
-                # _未分類/Collections），只查目标目录会重复下载落盘（治理状态混杂）
-                existing = find_existing_download(author, work_id, series, is_collection)
+                # 作者内查重：磁盘可能已存在该作品（别名角色目录/其他系列目录/
+                # _未分類/Collections），只查目标目录会重复下载落盘（治理状态混杂）。
+                # work_id 全局唯一 → 统一扫整个作者目录（7fa3fd3 review B1）。
+                existing = find_existing_download(author, work_id)
                 if existing:
-                    task["target"] = rel
+                    task["target"] = existing
                     task["log"].append(f"跳过：作品 {work_id} 已存在于 "
                                        f"{existing}（无需重复下载）")
                     if task["status"] != "cancelled":
                         task["status"] = "done"
-                        task["progress"] = task["total"] or task["progress"]
+                        task["progress"] = 1
+                        task["total"] = 1
                         # log 指向实际存在位置（供 sync 登记治理，不登记到空目标路径）
                         _log_done(task, safe_author_dir(author), existing)
                     return
@@ -294,6 +289,9 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                     task["progress"] = task["total"] or task["progress"]
                     author_dir = safe_author_dir(author)
                     _log_done(task, author_dir, rel)
+                    # 新角色目录（已有系列下）不冒泡到作者目录 mtime → 显式标记
+                    # 使全库搜索索引下次访问时重建（review A2 修复）
+                    _scanner.notify_change(author_dir)
             except Exception as e:
                 if task["status"] != "cancelled":
                     task["status"] = "error"
