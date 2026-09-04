@@ -87,18 +87,22 @@ def target_path(author: str, series: str | None, characters: list | None, is_col
 
 
 def find_existing_download(author: str, work_id: str) -> str | None:
-    """下载前查重：该作者目录下 `work_id` 是否已完整存在，返回已存在的相对路径。
+    """下载前查重：该作者目录下 `work_id` 是否**已完整存在**，返回所在相对路径。
 
     痛点：磁盘混杂治理不同状态（角色别名目录、同系列其他目录、_未分類、
     Collections 等），幂等检查只查目标目录会失效——同作品可能已落在别处。
 
     查重范围 = **整个作者目录**（work_id 全局唯一，同作者下出现在任何子目录
     都是同一作品；收窄到同系列会漏掉跨系列/Collections/_未分類的已有副本，
-    造成重复落盘）。系列收窄不成立（见 7fa3fd3 审查 B1）。
+    造成重复落盘）。
 
-    完整性判定（与 _download_* 自身口径一致）：存在 **size>0** 的
-    {work_id}.meta.json 或 {work_id}.zip（动图）。截断/空文件不视为已存在，
-    避免损坏文件永不修复。只 listdir + stat，不读内容。
+    完整性判定（**必须与幂等续传口径一致，否则冲突**——实战教训 2026-09-04）：
+      - 静态图：meta 存在 ≠ 图完整（meta 先写、图逐页下，中途失败留残缺 meta）。
+        须读 meta.pageCount，实际 `{wid}_p*` 图数 ≥ pageCount 才算已存在；残缺
+        → 返回 None，放行 _download_static 幂等续传补齐（不能短路）。
+      - 动图：zip 存在且 size>0（zip 是单文件整包，与 _download_ugoira 幂等口径
+        一致——其 size>0 即跳过下载）。
+    只读 meta + stat，不读图片内容。
     """
     work_id = str(work_id)
     author_dir = safe_author_dir(author)
@@ -108,15 +112,58 @@ def find_existing_download(author: str, work_id: str) -> str | None:
     for dp, _ds, _fs in os.walk(base):
         if ".thumbs" in dp or os.path.basename(dp).startswith("."):
             continue
-        # meta（静态/动图都写）须存在且非空
-        mp = os.path.join(dp, f"{work_id}.meta.json")
-        if os.path.isfile(mp) and os.path.getsize(mp) > 0:
-            return os.path.relpath(dp, _root())
-        # 动图兼容：zip 已下且非空（meta 可能滞后，zip 是图完整性关键）
+        # 动图：zip 已下且非空（与 _download_ugoira 幂等一致）
         zp = os.path.join(dp, f"{work_id}.zip")
         if os.path.isfile(zp) and os.path.getsize(zp) > 0:
             return os.path.relpath(dp, _root())
+        # 静态：meta 存在 → 读 pageCount 校验图是否下全（残缺不视为已存在）
+        mp = os.path.join(dp, f"{work_id}.meta.json")
+        if os.path.isfile(mp) and os.path.getsize(mp) > 0:
+            try:
+                with open(mp, encoding="utf-8") as f:
+                    body = json.load(f)
+            except Exception:
+                continue
+            pc = int(body.get("pageCount") or 0)
+            if pc <= 1:
+                # 单页：meta + 至少一个非空图文件即可（_p0 或无页码）
+                if _has_static_image(dp, work_id):
+                    return os.path.relpath(dp, _root())
+            else:
+                n = _count_static_images(dp, work_id)
+                if n >= pc:
+                    return os.path.relpath(dp, _root())
     return None
+
+
+def _count_static_images(dp: str, work_id: str) -> int:
+    """统计目录内 {work_id}_p{n}.ext 非空文件数。"""
+    n = 0
+    try:
+        for f in os.listdir(dp):
+            if f.startswith(work_id + "_p") and os.path.splitext(f)[1].lower() in (
+                    ".jpg", ".jpeg", ".png", ".gif", ".webp"):
+                p = os.path.join(dp, f)
+                if os.path.isfile(p) and os.path.getsize(p) > 0:
+                    n += 1
+    except OSError:
+        pass
+    return n
+
+
+def _has_static_image(dp: str, work_id: str) -> bool:
+    """单页静态图：目录内有 {work_id}_p0.ext 或 {work_id}.ext 非空文件。"""
+    for f in os.listdir(dp):
+        base = f
+        for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            if base.endswith(ext):
+                base = base[: -len(ext)]
+                break
+        if base == work_id or base == f"{work_id}_p0":
+            p = os.path.join(dp, f)
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return True
+    return False
 
 
 def preview(work_id: str) -> dict:
