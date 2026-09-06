@@ -219,20 +219,34 @@ _INDEX_SIG = None        # 构建时顶层 {author_dir: mtime} 签名
 _INDEX_STATE = "empty"   # empty | building | ready
 
 
-def notify_change(author_dir: str) -> None:
-    """标记某作者目录已变化（下载落盘后调用），触发下次搜索前索引重建。
+def notify_change(meta_path: str) -> None:
+    """新作品入库冒泡：把祖先链目录 mtime 置为该 meta 的 mtime（逐级 max）。
 
-    顶层签名只含作者目录 mtime，而新增**角色**目录（已有系列下）不会冒泡到
-    作者目录 mtime——webapp 下载到已存在系列下的新角色时索引会陈旧。
-    调用方（downloader 写盘后）显式 os.utime 作者目录，使签名检测到变化。
+    与本地治理语义对齐（pixiv_lib.bubble_on_work_entry）：作者/系列/角色目录
+    mtime = 该层级最近一次新作品入库时刻。webapp 下载直写 meta → meta mtime =
+    下载完成时刻即入库时间。仅新写 meta（if not exists）后调用；补图/幂等
+    跳过（meta 已存在，作品早已入库）不调用——内容变更 ≠ 新作品入库。
+
+    meta 顶层签名只含作者目录 mtime，新入库若新增**角色**目录（已有系列下）
+    不会自然冒泡到作者目录——显式逐级 os.utime 作者目录使签名变化触发索引
+    重建（原 review A2 修复），现改为 meta 入库时间而非 now（语义更准）。
     """
-    root = config.get_root()
-    p = os.path.join(root, author_dir)
+    root = os.path.realpath(config.get_root())
+    meta_path = os.path.realpath(meta_path)
+    if not meta_path.startswith(root + os.sep):
+        return
     try:
-        if os.path.isdir(p):
-            os.utime(p, None)  # mtime 置当前时间 → 顶层签名变化
+        t = os.path.getmtime(meta_path)
     except OSError:
-        pass
+        return
+    d = os.path.dirname(meta_path)
+    while d != root and d.startswith(root + os.sep):
+        try:
+            if os.path.getmtime(d) < t:
+                os.utime(d, (os.path.getatime(d), t))
+        except OSError:
+            pass
+        d = os.path.dirname(d)
 
 
 def _norm(s: str) -> str:

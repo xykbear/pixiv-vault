@@ -219,6 +219,7 @@ def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str) 
     if not os.path.exists(meta_path):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(body, f, ensure_ascii=False, indent=1)
+        task["_new_meta"] = meta_path  # 本次新写 meta（入库），run 尾冒泡用
     for idx, url in enumerate(urls):
         if task["status"] == "cancelled":
             return
@@ -265,6 +266,7 @@ def _download_ugoira(task: dict, client, body, dest_dir: str, base: str) -> None
         if not os.path.exists(meta_path):
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(body, f, ensure_ascii=False, indent=1)
+            task["_new_meta"] = meta_path  # 本次新写 meta（入库），run 尾冒泡用
         task["log"].append(f"动图 {work_id} 完成：{len(frames)} 帧")
 
 
@@ -288,6 +290,7 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
         "is_collection": is_collection,
         "error": "",
         "target": "",
+        "_new_meta": None,  # 本次新写 meta 路径（入库冒泡用，内部字段）
     }
     with _LOCK:
         _TASKS[task_id] = task
@@ -336,9 +339,13 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                     task["progress"] = task["total"] or task["progress"]
                     author_dir = safe_author_dir(author)
                     _log_done(task, author_dir, rel)
-                    # 新角色目录（已有系列下）不冒泡到作者目录 mtime → 显式标记
-                    # 使全库搜索索引下次访问时重建（review A2 修复）
-                    _scanner.notify_change(author_dir)
+                    # 本次新写 meta（作品入库）→ 冒泡祖先链（作者/系列/角色目录
+                    # mtime = meta 入库时刻）。补图/幂等续传（meta 已存在，作品
+                    # 早已入库）不冒泡——内容变更 ≠ 新入库。原 notify_change
+                    # 语义（author=now）升级为 meta 入库时间（review A2 保留：
+                    # 新角色目录不自然冒泡作者层，逐级 os.utime 使其被签名感知）。
+                    if task.get("_new_meta"):
+                        _scanner.notify_change(task["_new_meta"])
             except Exception as e:
                 if task["status"] != "cancelled":
                     task["status"] = "error"
