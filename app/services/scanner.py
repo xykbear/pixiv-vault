@@ -120,8 +120,9 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
     character 非空时扫描 {author}/{series}/{character}/；character 为空时扫描
     {author}/{series}/ 本身（适配 _未分类 平铺结构）。
 
-    静态图每页一个条目；动图一个条目（id 为 base，type=ugoira）。
-    返回项含 author/series/character/file，前端可直接拼 img/thumb URL。
+    静态图每页一个条目；动图一个条目（id 为 base，type=ugoira）；非 pixiv 命名
+    的手工/外部图片也列出（id = 去扩展名文件名，置于末尾）。返回项含
+    author/series/character/file，前端可直接拼 img/thumb URL。
     """
     root = config.get_root()
     if character:
@@ -145,6 +146,15 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
             "series": series,
             "character": character,
         })
+    # 手工/外部图（非 pixiv 数字命名）原样列出；type 保持 static，不影响动图判定
+    ext_files = sorted(
+        (f for f in os.listdir(d)
+         if os.path.isfile(os.path.join(d, f))
+         and not f.startswith(".")
+         and os.path.splitext(f)[1].lower() in IMG_EXTS
+         and not _static_work_id(f)),
+        key=lambda f: f.lower(),
+    )
     # 动图 zip（目录内）: {id}.zip（新规则）或 {系列}-{角色}-{id}.zip（旧平铺兼容）
     zips = sorted(
         (f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) and f.endswith(".zip")),
@@ -162,6 +172,17 @@ def list_images(author: str, series: str, character: str = "") -> list[dict]:
         })
     # 统一按 作品ID 排序（静态 + 动图混排；旧格式 {系列}-{角色}-{id} 提取尾部数字）
     images.sort(key=lambda im: (_sort_id(im["id"]), im["type"] == "static", im["id"]))
+    # 外部图片追加在末尾，不改变上面 pixiv 作品的顺序
+    for f in ext_files:
+        base = os.path.splitext(f)[0]
+        images.append({
+            "type": "static",
+            "id": base,
+            "file": f,
+            "author": author,
+            "series": series,
+            "character": character,
+        })
     return images
 
 
