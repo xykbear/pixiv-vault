@@ -2,6 +2,11 @@
 const $ = (sel) => document.querySelector(sel);
 const app = document.getElementById('app');
 
+// 程序化换层/恢复滚动期间挂起“滚动记忆”：DOM 重建产生的瞬时滚动、
+// 以及上一层的延迟/合并 scroll 事件，都会按“事件时 curLevel”错记到新层，故须挂起。
+let _scrollRestoring = false;
+let _scrollRestoreGen = 0;
+
 const state = {
   view: 'browse',
   // 浏览状态
@@ -116,7 +121,7 @@ async function renderBrowse() {
   bindSearch();
   renderBreadcrumb();
   renderAuthors();
-  requestAnimationFrame(() => window.scrollTo(0, 0));
+  _restoreScroll(0);
 }
 
 function bindSearch() {
@@ -247,6 +252,7 @@ function renderBreadcrumb() {
 }
 
 function navCrumb(i) {
+  _saveScrollNow();  // 记录离开层位置（此刻 DOM 仍为旧层）
   const target = state.breadcrumb.slice(0, i);
   state.breadcrumb = target;
   state.curLevel = i;
@@ -259,7 +265,7 @@ function navCrumb(i) {
   else if (i === 1) renderSeries();
   else if (i === 2) renderCharacters();
   else if (i === 3) renderImages();
-  requestAnimationFrame(() => window.scrollTo(0, state.scrollPosByLevel[i] || 0));
+  _restoreScroll(state.scrollPosByLevel[i]);
 }
 
 // 刷新当前层数据（不依赖浏览器缓存，重新拉取）；搜索态下重跑全库搜索
@@ -269,6 +275,7 @@ async function refreshLevel() {
     if (q) { renderSearchLoading(); await doGlobalSearch(q); }
     return;
   }
+  _saveScrollNow();
   const i = state.curLevel;
   const keep = state.scrollPosByLevel[i] || 0;
   if (i === 0) {
@@ -290,7 +297,7 @@ async function refreshLevel() {
     state.images = d.images;
     renderImages();
   }
-  requestAnimationFrame(() => window.scrollTo(0, keep));
+  _restoreScroll(keep);
 }
 
 // 切换排序（名称/日期），持久化到 localStorage
@@ -325,6 +332,7 @@ function renderAuthors() {
 
 async function loadSeries(author) {
   const d = await api(`/api/tree/entries?author=${enc(author)}`);
+  _saveScrollNow();
   state.entries = d.entries;
   state.breadcrumb = [author];
   state.curLevel = 1;
@@ -334,7 +342,7 @@ async function loadSeries(author) {
   bindSearch();
   renderBreadcrumb();
   renderSeries();
-  requestAnimationFrame(() => window.scrollTo(0, 0));
+  _restoreScroll(0);
 }
 
 function renderSeries() {
@@ -372,6 +380,7 @@ function renderSeries() {
 
 async function loadCharacters(author, series) {
   const d = await api(`/api/tree/characters?author=${enc(author)}&series=${enc(series)}`);
+  _saveScrollNow();
   state.characters = d.characters;
   state.breadcrumb = [author, series];
   state.curLevel = 2;
@@ -381,7 +390,7 @@ async function loadCharacters(author, series) {
   bindSearch();
   renderBreadcrumb();
   renderCharacters();
-  requestAnimationFrame(() => window.scrollTo(0, 0));
+  _restoreScroll(0);
 }
 
 function renderCharacters() {
@@ -411,6 +420,7 @@ function renderCharacters() {
 async function loadImages(author, series, character) {
   const qs = character ? `author=${enc(author)}&series=${enc(series)}&character=${enc(character)}` : `author=${enc(author)}&series=${enc(series)}`;
   const d = await api(`/api/tree/images?${qs}`);
+  _saveScrollNow();
   state.images = d.images;
   state.breadcrumb = character ? [author, series, character] : [author, series];
   state.curLevel = 3;
@@ -420,7 +430,7 @@ async function loadImages(author, series, character) {
   bindSearch();
   renderBreadcrumb();
   renderImages();
-  requestAnimationFrame(() => window.scrollTo(0, 0));
+  _restoreScroll(0);
 }
 
 function renderImages() {
@@ -461,6 +471,7 @@ let _viewer = null;          // Viewer.js 实例（仅静态图）
 
 // 从任意层级打开：图片列表（当前角色下的全部图片）
 function openViewerAt(idx) {
+  _saveScrollNow();  // 打开查看器前固定当前层位置（同步读 scrollY，不依赖事件时序）
   const im = state.images[idx];
   // 动图：独立播放器，不经 Viewer.js；支持同目录动图左右滑动切换
   if (im && im.type === 'ugoira') {
@@ -604,6 +615,8 @@ function toggleUgoiraPause() {
 }
 
 function openUgoiraPlayer(ugList, idx) {
+  _saveScrollNow();  // 打开前固定当前层位置
+  _suspendScrollMemory();  // 覆盖层重建 DOM 时勿改动底层列表的滚动记忆
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
   if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
   _ugCancel = false;
@@ -742,9 +755,7 @@ function closeViewer() {
     bindSearch();
     renderBreadcrumb();
     renderImages();
-    requestAnimationFrame(() => {
-      window.scrollTo(0, state.scrollPosByLevel[3] || 0);
-    });
+    _restoreScroll(state.scrollPosByLevel[3]);
   } else if (state.curLevel === 2) {
     loadCharacters(state.breadcrumb[0], state.breadcrumb[1]);
   } else if (state.curLevel === 1) {
@@ -772,10 +783,40 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') hideViewer();
 });
 
-// 记录列表滚动位置（按当前层级）
+// 记录列表滚动位置（按当前层级）；仅浏览态、非搜索、非查看器且未挂起时记录
 window.addEventListener('scroll', () => {
-  if (!state.viewer) state.scrollPosByLevel[state.curLevel] = window.scrollY;
+  if (state.view !== 'browse' || state.searchMode || state.viewer || _scrollRestoring) return;
+  state.scrollPosByLevel[state.curLevel] = window.scrollY;
 });
+
+// 立即记录“离开层”的滚动位置（DOM 仍为旧层，window.scrollY 即真实位置）
+function _saveScrollNow() {
+  if (state.view !== 'browse' || state.searchMode || state.viewer) return;
+  state.scrollPosByLevel[state.curLevel] = window.scrollY;
+}
+
+// 两帧后解除挂起（此时换层与恢复引发的 scroll 事件均已派发完）；代际守卫防提前解挂
+function _endScrollSuspend(gen) {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (gen === _scrollRestoreGen) _scrollRestoring = false;
+  }));
+}
+
+// 恢复某层滚动位置（挂起期间不写记忆）
+function _restoreScroll(y) {
+  _scrollRestoring = true;
+  const gen = ++_scrollRestoreGen;
+  requestAnimationFrame(() => {
+    window.scrollTo(0, y || 0);
+    _endScrollSuspend(gen);
+  });
+}
+
+// 仅挂起记忆、不滚动（如打开动图播放器覆盖层，底层列表位置需保原样）
+function _suspendScrollMemory() {
+  _scrollRestoring = true;
+  _endScrollSuspend(++_scrollRestoreGen);
+}
 
 // ================= 工具函数 =================
 
