@@ -17,10 +17,13 @@ const state = {
   breadcrumb: [],
   scrollPosByLevel: {},  // 每层滚动位置（0=作者 1=系列 2=角色 3=图片），面包屑返回时恢复
   curLevel: 0,         // 0=作者 1=系列 2=角色 3=图片
-  searchMode: false,   // true=内容区显示全库搜索结果（Enter 触发）；false=层级内过滤
+  searchMode: false,   // true=全库搜索视图（仅 Enter 触发）
   searchQuery: '',
+  searchResults: null, // 最近一次全库搜索结果（返回原地恢复用）
+  returnTo: null,      // {query, results, scrollY}：从搜索结果进入图片层时记录
+  _viewBeforeSearch: null, // 打开搜索前的视图（取消搜索后回到它）
   // 排序（localStorage 持久化）
-  sortMode: localStorage.getItem('pixiv_sort') || 'date',
+  sortMode: localStorage.getItem('pixiv_sort') === 'name' ? 'name' : 'date',  // 默认按日期
   // 查看器
   viewer: null,
   dlMode: 'tag',        // 'collection' | 'tag'
@@ -37,25 +40,22 @@ const ICONS = {
   chevron: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
   back: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>',
   close: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
-  search: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
-  check: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
-  x: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
-  refresh: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>',
+  check: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+  x: '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  search: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.2-4.2"/></svg>',
+  sort: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M8 4v14"/><path d="m4.5 14.5 3.5 3.5 3.5-3.5"/><path d="M16 20V6"/><path d="m12.5 9.5 3.5-3.5 3.5 3.5"/></svg>',
+  refresh: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 4v5h-5"/></svg>',
+  shuffle: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.35" fill="currentColor" stroke="none"/><circle cx="15" cy="15" r="1.35" fill="currentColor" stroke="none"/></svg>',
 };
 
 function showView(name) {
   if (state.view !== name) cleanupViewerOnTabSwitch();
   state.view = name;
-  ['browse', 'download', 'settings'].forEach(v => {
-    const nav = document.getElementById('nav-' + v);
-    if (v === name) {
-      nav.classList.remove('text-gray-400', 'border-transparent');
-      nav.classList.add('text-pixiv-blue', 'border-pixiv-blue');
-    } else {
-      nav.classList.add('text-gray-400', 'border-transparent');
-      nav.classList.remove('text-pixiv-blue', 'border-pixiv-blue');
-    }
-  });
+  state.searchMode = false;
+  state.searchQuery = '';
+  state.returnTo = null;
+  closeMenu();
+  syncChrome();
   if (name === 'browse') renderBrowse();
   if (name === 'download') renderDownload();
   if (name === 'settings') renderSettings();
@@ -85,31 +85,18 @@ async function api(path, opts) {
 // ================= 浏览视图 =================
 
 function browseShell() {
+  // 层内过滤已移除：搜索统一走右下搜索钮的全库搜索（Enter 触发）。
+  // 顶/底固定 chrome 由 index.html 提供；面包屑是内容第一行，随内容滚动。
   return `
-    <div class="max-w-4xl mx-auto">
-      <div class="sticky-bc sticky z-40 bg-pixiv-light/95 backdrop-blur px-4 pt-3 pb-2">
-        <div id="breadcrumb" class="text-sm text-gray-500 mb-2 flex items-center gap-1 flex-wrap overflow-x-auto no-scrollbar"></div>
-        <div class="flex gap-2">
-          <div class="relative flex-1">
-            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">${ICONS.search}</span>
-            <input id="search" type="search" placeholder="${state.curLevel === 0 ? '搜索作者（回车全库找角色）' : '搜索（回车全库找角色）'}" autocomplete="off"
-              class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
-          </div>
-          ${!state.searchMode && state.curLevel < 3 ? `
-          <button id="sort-btn" onclick="toggleSort()" title="切换排序"
-            class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-xs text-gray-500 shrink-0">
-            ${state.sortMode === 'date' ? '按日期' : '按名称'}
-          </button>` : ''}
-          <button onclick="refreshLevel()" title="刷新${state.searchMode ? '搜索结果' : '当前层'}"
-            class="px-3 py-2.5 rounded-lg border border-pixiv-border bg-white text-gray-500 shrink-0">${ICONS.refresh}</button>
-        </div>
-      </div>
-      <div id="content" class="px-4 py-3"></div>
+    <div class="max-w-5xl mx-auto px-4">
+      <div id="breadcrumb"></div>
+      <div id="content"></div>
     </div>`;
 }
 
 async function renderBrowse() {
   resetSearch();
+  state.returnTo = null;
   state.curLevel = 0;
   state.breadcrumb = [];
   if (state.authors.length === 0) {
@@ -118,36 +105,126 @@ async function renderBrowse() {
   }
   state.scrollPosByLevel[0] = 0;
   app.innerHTML = browseShell();
-  bindSearch();
   renderBreadcrumb();
   renderAuthors();
   _restoreScroll(0);
 }
 
-function bindSearch() {
-  const s = $('#search');
-  if (s) {
-    s.addEventListener('input', filterCurrent);
-    s.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && (e.target.value || '').trim()) {
-        e.preventDefault();
-        doGlobalSearch((e.target.value || '').trim());
-      }
+// ================= 全库搜索（唯一搜索语义 · 仅 Enter 触发） =================
+// 输入不触发请求；仅回车调 /api/search（backend 内存索引，首次后台构建）。
+// 结果即一层：点条目进图片层，返回原地恢复结果（state.returnTo）。
+let _searchPoll = null;
+
+const SEARCH_HISTORY_KEY = 'pixiv_search_history';
+const SEARCH_HISTORY_MAX = 8;
+
+function loadSearchHistory() {
+  try { return JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || '[]').slice(0, SEARCH_HISTORY_MAX); }
+  catch (e) { return []; }
+}
+function saveSearchHistory(q) {
+  const h = loadSearchHistory().filter(x => x !== q);
+  h.unshift(q);
+  localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(h.slice(0, SEARCH_HISTORY_MAX)));
+}
+function clearSearchHistory() {
+  localStorage.removeItem(SEARCH_HISTORY_KEY);
+  renderSearchHistory();
+}
+function runSearchFromHistory(i) {
+  const w = loadSearchHistory()[i];
+  const inp = $('#search-input');
+  if (!w || !inp) return;
+  inp.value = w;
+  runSearch(w, true);
+}
+function clearSearchInput() {
+  const inp = $('#search-input');
+  if (!inp) return;
+  inp.value = '';
+  const clr = $('.sclr');
+  if (clr) clr.style.display = 'none';
+  renderSearchHistory();
+  inp.focus();
+}
+
+function searchShell() {
+  // 底部搜索条：胶囊输入框 + 独立取消钮（返回），与固定 chrome 同层
+  return `
+    <div class="max-w-5xl mx-auto px-4">
+      <div id="search-body"></div>
+    </div>
+    <div id="search-bar">
+      <div class="sfield">
+        <span class="sico">${ICONS.search}</span>
+        <input id="search-input" type="search" placeholder="搜索角色 / 系列（全库 · 回车）" autocomplete="off" autocapitalize="off">
+        <button class="sclr" onclick="clearSearchInput()" aria-label="清除">${ICONS.x}</button>
+      </div>
+      <button id="search-cancel" onclick="closeSearch()" title="返回" aria-label="返回">${ICONS.close}</button>
+    </div>`;
+}
+
+// 挂载搜索视图（首次进入传 null；从结果返回时传 returnTo 以原地恢复）
+function mountSearch(rt) {
+  state.searchMode = true;
+  state.searchQuery = (rt && rt.query) || '';
+  app.innerHTML = searchShell();
+  const inp = $('#search-input');
+  if (inp) {
+    inp.value = state.searchQuery;
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); runSearch(inp.value.trim(), true); }
+      else if (e.key === 'Escape') { closeSearch(); }
     });
+    // 仅切换「清除」按钮可见性，不触发请求（搜索只由 Enter 触发）
+    inp.addEventListener('input', () => {
+      const clr = $('.sclr');
+      if (clr) clr.style.display = inp.value ? 'flex' : 'none';
+    });
+    const clr0 = $('.sclr');
+    if (clr0) clr0.style.display = inp.value ? 'flex' : 'none';  // 恢复结果时也要按值同步
+    inp.focus();
+  }
+  if (rt && rt.results) {
+    state.searchResults = rt.results;
+    renderSearchResults(state.searchQuery, rt.results);
+  } else {
+    state.searchResults = null;
+    renderSearchHistory();
+  }
+  syncChrome();
+  closeMenu();
+}
+
+function openSearch() {
+  if (state.searchMode) { const i = $('#search-input'); if (i) i.focus(); return; }
+  // 记住来源视图：搜索是顶层视图，取消后应回到原 tab（而非固定回浏览）
+  state._viewBeforeSearch = state.view;
+  state.returnTo = null;
+  cleanupViewerOnTabSwitch();
+  mountSearch(null);
+}
+
+function closeSearch() {
+  if (_searchPoll) { clearTimeout(_searchPoll); _searchPoll = null; }
+  state.searchMode = false;
+  state.searchQuery = '';
+  state.searchResults = null;
+  const back = state._viewBeforeSearch || 'browse';
+  state._viewBeforeSearch = null;
+  if (back !== 'browse') {
+    showView(back);
+  } else {
+    renderLevelView();
+    _restoreScroll(state.scrollPosByLevel[state.curLevel] || 0);  // 恢复离开层的滚动位置
   }
 }
 
-// 跨作者搜索：按角色/系列名全库匹配（backend 内存索引，首次触发后台构建）。
-// 结果展示在内容区，点条目深链到 {作者}/{系列}/{角色} 图片层。
-let _searchPoll = null;
-
-async function doGlobalSearch(q) {
+async function runSearch(q, remember) {
+  if (!q) { renderSearchHistory(); return; }
   if (_searchPoll) { clearTimeout(_searchPoll); _searchPoll = null; }
-  if (_globalDebounce) { clearTimeout(_globalDebounce); _globalDebounce = null; }
-  state.searchMode = true;       // 内容区显示搜索结果而非层级列表
   state.searchQuery = q;
-  const sb = $('#sort-btn');
-  if (sb) sb.style.display = 'none';   // 排序仅对层级列表有意义，搜索态隐藏
+  if (remember) saveSearchHistory(q);
   renderSearchLoading();
   await searchOnce(q);
 }
@@ -161,118 +238,267 @@ async function searchOnce(q, attempt = 0) {
       renderSearchError('索引构建超时（NAS 不可读？），稍后重试');
       return;
     }
-    renderSearchLoading('正在构建全库索引（首次需约 20s）…');
-    _searchPoll = setTimeout(() => { if (state.searchMode) searchOnce(q, attempt + 1); }, 1500);
+    renderSearchLoading('正在构建全库索引（首次约 20s）…');
+    _searchPoll = setTimeout(() => {
+      if (state.searchMode && state.searchQuery === q) searchOnce(q, attempt + 1);
+    }, 1500);
     return;
   }
-  renderSearchResults(q, d.results);
+  state.searchResults = d.results || [];
+  renderSearchResults(q, state.searchResults);
 }
 
 function renderSearchLoading(msg) {
-  const content = $('#content');
-  if (!content) return;
-  content.innerHTML = `<div class="text-center text-gray-400 py-16 text-sm fade-in">
+  const box = $('#search-body');
+  if (!box) return;
+  box.innerHTML = `<div class="text-center text-gray-400 py-16 text-sm fade-in">
     <div class="inline-block w-8 h-8 border-2 border-pixiv-blue border-t-transparent rounded-full animate-spin mb-3"></div>
-    <div>${msg || '搜索中…'}</div></div>`;
+    <div>${esc(msg || '搜索中…')}</div></div>`;
 }
 
 function renderSearchError(msg) {
-  const content = $('#content');
-  if (!content) return;
-  content.innerHTML = empty('搜索失败: ' + msg);
+  const box = $('#search-body');
+  if (!box) return;
+  box.innerHTML = `<div class="empty-hint">搜索失败：${esc(msg)}</div>`;
+}
+
+function renderSearchHistory() {
+  const box = $('#search-body');
+  if (!box) return;
+  const h = loadSearchHistory();
+  box.innerHTML = h.length ? `
+    <div class="sect">搜索历史</div>
+    <div class="chips">${h.map((w, i) => `<button class="chip" onclick="runSearchFromHistory(${i})">${esc(w)}</button>`).join('')}</div>
+    <button class="linkbtn" onclick="clearSearchHistory()">清除历史</button>`
+    : `<div class="empty-hint">输入关键词后按回车，跨作者搜索角色 / 系列</div>`;
 }
 
 function renderSearchResults(q, results) {
-  const content = $('#content');
-  if (!content) return;
+  const box = $('#search-body');
+  if (!box) return;
   const header = results.length
-    ? `<div class="text-xs text-gray-400 mb-2">“${esc(q)}” 全库命中 ${results.length} 个角色/系列</div>`
-    : `<div class="text-xs text-gray-400 mb-2">“${esc(q)}” 无跨作者命中（可在当前层内继续筛选）</div>`;
+    ? `<div class="text-xs text-gray-400 my-3">“${esc(q)}” 全库命中 <b style="color:var(--accent)">${results.length}</b> 个角色 / 系列</div>`
+    : `<div class="text-xs text-gray-400 my-3">“${esc(q)}” 无跨作者命中</div>`;
   const rows = results.map(r => `
-    <button onclick="jumpToChar('${esc(r.author)}','${esc(r.series)}','${esc(r.character)}')"
-      class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
-      <div class="w-10 h-10 rounded-md bg-pixiv-light text-pixiv-blue flex items-center justify-center shrink-0">${ICONS.image}</div>
-      <div class="flex-1 min-w-0">
-        <div class="font-medium truncate">${esc(r.character)}</div>
-        <div class="text-xs text-gray-400 truncate">${esc(r.author)} › ${esc(r.series)}</div>
-      </div>
-      <span class="text-gray-300 shrink-0">${ICONS.chevron}</span>
+    <button onclick="jumpToChar('${esc(r.author)}','${esc(r.series)}','${esc(r.character)}')" class="row-item">
+      <div class="row-th">${ICONS.image}</div>
+      <div class="row-tx"><b>${esc(r.character)}</b><i>${esc(r.author)} › ${esc(r.series)}</i></div>
+      <span class="row-chev">${ICONS.chevron}</span>
     </button>`).join('');
-  content.innerHTML = `<div class="fade-in">${header}<div>${rows}</div></div>`;
+  box.innerHTML = `<div class="fade-in">${header}<div>${rows}</div></div>`;
 }
 
-// 搜索结果深链：进入 {作者}/{系列}/{角色} 图片层（面包屑随新导航重建）
+// 搜索结果深链：进入图片层；记 returnTo 以便返回原地恢复结果
 function jumpToChar(author, series, character) {
+  if (state.searchMode) {
+    state.returnTo = { query: state.searchQuery, results: state.searchResults || [], scrollY: window.scrollY };
+    // 进入图片层即浏览上下文：否则 view 仍是 download/settings → 返回钮消失、returnTo 卡死
+    state.view = 'browse';
+    updateTabPill();
+  } else {
+    state.returnTo = null;
+  }
   loadImages(author, series, character);
 }
 
-// 层级导航时重置搜索状态（避免残留的全库查询过滤新层级列表）
+// 层级导航时重置搜索状态
 function resetSearch() {
   state.searchMode = false;
   state.searchQuery = '';
+  state.searchResults = null;
 }
 
-let _globalDebounce = null;
-
-function filterCurrent() {
-  if (state.searchMode) {
-    const q = query();
-    if (!q) { renderEmptySearch(); return; }
-    // 全库搜索输入防抖（回车是主触发；打字改词时 400ms 后自动重搜）
-    if (_globalDebounce) clearTimeout(_globalDebounce);
-    _globalDebounce = setTimeout(() => {
-      renderSearchLoading();
-      doGlobalSearch(q);
-    }, 400);
-    return;
-  }
-  if (state.curLevel === 0) renderAuthors();
-  else if (state.curLevel === 1) renderSeries();
-  else if (state.curLevel === 2) renderCharacters();
-  else if (state.curLevel === 3) renderImages();
-}
-
-function renderEmptySearch() {
-  const content = $('#content');
-  if (!content) return;
-  content.innerHTML = empty('输入关键词后按回车，跨作者搜索角色/系列');
-}
-
-function query() {
-  return ($('#search')?.value || '').toLowerCase().trim();
-}
+// 层内过滤已移除：保留空实现，使各层渲染始终走完整列表分支
+function query() { return ''; }
 
 function renderBreadcrumb() {
   const el = $('#breadcrumb');
+  syncChrome();
   if (!el) return;
+  if (state.searchMode) { el.innerHTML = ''; return; }
   const crumbs = state.breadcrumb;
-  el.innerHTML = crumbs.length ? crumbs.map((c, i) => `
-    <button class="text-pixiv-blue shrink-0" onclick="navCrumb(${i})">${esc(c)}</button>${i < crumbs.length - 1 ? '<span class="mx-1 text-gray-300">›</span>' : ''}
-  `).join('') : '';
+  // 从搜索结果进入：只显示「搜索结果 › 当前项」。
+  // 不暴露 author/series 层级——那些层的缓存数据属于上一次浏览的其它作者，
+  // 显示成全路径会变成「点了没反应/串数据」的失效面包屑。
+  if (state.returnTo) {
+    const cur = crumbs.length ? crumbs[crumbs.length - 1] : '';
+    el.innerHTML = `<div class="bc">
+      <button class="bc-c root" onclick="goBack()">${ICONS.search}<span>搜索结果</span></button>
+      ${cur ? `<span class="bc-s">›</span><span class="bc-c now">${esc(cur)}</span>` : ''}
+    </div>`;
+    return;
+  }
+  // 正常层级：每一项都可点（含最后一项 → 上一层），最后一项高亮
+  el.innerHTML = crumbs.length
+    ? `<div class="bc">${crumbs.map((c, i) => `
+        <button class="bc-c${i === crumbs.length - 1 ? ' now' : ''}" onclick="navCrumb(${i})">${esc(c)}</button>${i < crumbs.length - 1 ? '<span class="bc-s">›</span>' : ''}
+      `).join('')}</div>`
+    : '';
 }
 
 function navCrumb(i) {
-  _saveScrollNow();  // 记录离开层位置（此刻 DOM 仍为旧层）
-  const target = state.breadcrumb.slice(0, i);
-  state.breadcrumb = target;
+  _saveScrollNow();          // 记录离开层位置（此刻 DOM 仍为旧层）
+  state.returnTo = null;     // 面包屑返回 = 离开搜索来源
+  state.breadcrumb = state.breadcrumb.slice(0, i);
   state.curLevel = i;
-  // 面包屑返回：重置搜索状态，用缓存数据渲染对应层，恢复该层滚动位置
   resetSearch();
-  app.innerHTML = browseShell();
-  bindSearch();
-  renderBreadcrumb();
-  if (i === 0) renderAuthors();
-  else if (i === 1) renderSeries();
-  else if (i === 2) renderCharacters();
-  else if (i === 3) renderImages();
+  renderLevelView();
   _restoreScroll(state.scrollPosByLevel[i]);
 }
 
-// 刷新当前层数据（不依赖浏览器缓存，重新拉取）；搜索态下重跑全库搜索
+// ================= 固定 chrome：返回 / ⋯ 菜单 / 导航胶囊 =================
+
+// 按当前 curLevel 渲染层级视图（不重新拉取数据）
+function renderLevelView() {
+  app.innerHTML = browseShell();
+  renderBreadcrumb();   // 内部会 syncChrome()
+  if (state.curLevel === 0) renderAuthors();
+  else if (state.curLevel === 1) renderSeries();
+  else if (state.curLevel === 2) renderCharacters();
+  else renderImages();
+}
+
+// 同步固定 chrome：返回/标题、⋯ 可见性、底栏与搜索钮、胶囊选中
+function syncChrome() {
+  const searching = !!state.searchMode;
+  // 搜索视图是顶层视图：不显示返回（用底部搜索条的独立取消钮退出）
+  const canBack = !searching && state.view === 'browse' && (!!state.returnTo || state.curLevel > 0);
+
+  const back = $('#btn-back');
+  if (back) back.style.display = canBack ? '' : 'none';
+
+  // 标题：搜索视图「搜索」；顶层显示 section 名（iOS 实践：顶层用标题而非返回）
+  const titleEl = $('#page-title');
+  if (titleEl) {
+    let title = '';
+    if (searching) title = '搜索';
+    else if (!canBack) {
+      title = state.view === 'download' ? '下载'
+            : state.view === 'settings' ? '设置' : '浏览';
+    }
+    titleEl.textContent = title;
+    titleEl.style.display = title ? 'flex' : 'none';
+  }
+
+  const menuBtn = $('#btn-menu');
+  if (menuBtn) menuBtn.style.display = (state.view === 'browse' && !searching) ? '' : 'none';
+  const tabbar = $('#tabbar');
+  if (tabbar) tabbar.style.display = searching ? 'none' : '';
+  const fab = $('#btn-search');
+  if (fab) fab.style.display = searching ? 'none' : '';
+  updateTabPill();
+}
+
+function updateTabPill() {
+  const nav = $('#tabbar');
+  if (!nav || nav.style.display === 'none') return;
+  const segs = [...nav.querySelectorAll('.seg')];
+  const i = Math.max(0, segs.findIndex(s => s.dataset.view === state.view));
+  segs.forEach((s, k) => s.classList.toggle('on', k === i));
+  const pill = $('#tab-pill');
+  const s = segs[i];
+  if (pill && s) {
+    pill.style.width = s.offsetWidth + 'px';
+    pill.style.transform = `translateX(${s.offsetLeft}px)`;  // offsetLeft 已相对 #tabbar(position:relative)
+  }
+}
+
+// 统一的返回：仅浏览层级用（顶层/搜索视图不出现返回）
+function goBack() {
+  closeMenu();
+  if (state.view !== 'browse') return;
+  if (state.searchMode) { closeSearch(); return; }
+  if (state.returnTo) {
+    const rt = state.returnTo;
+    state.returnTo = null;
+    mountSearch(rt);
+    requestAnimationFrame(() => window.scrollTo(0, rt.scrollY || 0));
+    return;
+  }
+  if (state.curLevel > 0) navCrumb(state.curLevel - 1);
+}
+
+function closeMenu() {
+  const p = $('#menu-pop');
+  if (p) p.style.display = 'none';
+}
+
+function toggleMenu() {
+  const p = $('#menu-pop');
+  if (!p) return;
+  if (p.style.display !== 'none') { closeMenu(); return; }
+  renderMenu();
+  p.style.display = 'block';
+}
+
+function renderMenu() {
+  const p = $('#menu-pop');
+  if (!p) return;
+  const sortDate = state.sortMode !== 'name';
+  // 选中态：图标转为 accent「纯色」，不加 badge
+  p.innerHTML = [
+    `<button class="mi${sortDate ? ' on' : ''}" onclick="menuSort('date')"><span class="mic">${ICONS.sort}</span><span class="k">排序：按日期</span></button>`,
+    `<button class="mi${sortDate ? '' : ' on'}" onclick="menuSort('name')"><span class="mic">${ICONS.sort}</span><span class="k">排序：按名称</span></button>`,
+    '<div class="msep"></div>',
+    `<button class="mi" onclick="menuRefresh()"><span class="mic">${ICONS.refresh}</span><span class="k">刷新本层</span></button>`,
+    `<button class="mi" onclick="menuRandom()"><span class="mic">${ICONS.shuffle}</span><span class="k">随机角色</span></button>`,
+  ].join('');
+}
+
+function menuSort(mode) {
+  state.sortMode = mode;
+  localStorage.setItem('pixiv_sort', mode);
+  closeMenu();
+  if (!state.searchMode) renderLevelView();
+}
+
+function menuRefresh() {
+  closeMenu();
+  refreshLevel();
+}
+
+function menuRandom() {
+  closeMenu();
+  randomChar();
+}
+
+// 随机角色：走全库索引（首次需建索引 → 轮询后跳转）
+async function randomChar(attempt = 0) {
+  // 仅在浏览上下文轮询/跳转（切到下载/设置或进了搜索就放弃）
+  if (state.view !== 'browse' || state.searchMode) return;
+  let d;
+  try { d = await api('/api/random'); } catch (e) { return; }
+  if (d.state !== 'ready') {
+    if (attempt >= 40) return;
+    if (attempt === 0) toast('正在构建全库索引（首次约 20s）…');
+    setTimeout(() => randomChar(attempt + 1), 1500);
+    return;
+  }
+  if (d.item) {
+    state.returnTo = null;
+    jumpToChar(d.item.author, d.item.series, d.item.character);
+  }
+}
+
+let _toastTimer = null;
+function toast(msg, ms = 1800) {
+  const el = document.createElement('div');
+  el.className = 'fixed left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded-full text-white text-sm';
+  el.style.background = 'rgba(28,28,30,.86)';
+  el.style.bottom = 'calc(12px + var(--dock) + 16px + env(safe-area-inset-bottom))';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.remove(), ms);
+}
+
+window.addEventListener('resize', () => { if (!state.searchMode) updateTabPill(); });
+
+// 刷新当前层数据（不依赖浏览器缓存，重新拉取）；搜索态下重跑搜索
 async function refreshLevel() {
   if (state.searchMode) {
-    const q = query();
-    if (q) { renderSearchLoading(); await doGlobalSearch(q); }
+    const q = state.searchQuery;
+    if (q) await runSearch(q);
     return;
   }
   _saveScrollNow();
@@ -301,17 +527,6 @@ async function refreshLevel() {
 }
 
 // 切换排序（名称/日期），持久化到 localStorage
-function toggleSort() {
-  state.sortMode = state.sortMode === 'name' ? 'date' : 'name';
-  localStorage.setItem('pixiv_sort', state.sortMode);
-  const btn = $('#sort-btn');
-  if (btn) btn.textContent = state.sortMode === 'date' ? '按日期' : '按名称';
-  if (state.curLevel === 0) renderAuthors();
-  else if (state.curLevel === 1) renderSeries();
-  else if (state.curLevel === 2) renderCharacters();
-  else if (state.curLevel === 3) renderImages();
-}
-
 function renderAuthors() {
   const q = query();
   const base = sortItems(state.authors, 'author');
@@ -319,14 +534,10 @@ function renderAuthors() {
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无匹配作者'); return; }
   content.innerHTML = list.map(a => `
-    <button onclick="loadSeries('${esc(a.author)}')"
-      class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
-      <div class="w-10 h-10 rounded-md bg-pixiv-light flex items-center justify-center text-pixiv-blue shrink-0">${ICONS.folder}</div>
-      <div class="flex-1 min-w-0">
-        <div class="font-medium truncate">${esc(a.author)}</div>
-        <div class="text-xs text-gray-400">作者 · ${fmtDate(a.mtime)}</div>
-      </div>
-      <span class="text-gray-300">${ICONS.chevron}</span>
+    <button onclick="loadSeries('${esc(a.author)}')" class="row-item">
+      <div class="row-th">${ICONS.folder}</div>
+      <div class="row-tx"><b>${esc(a.author)}</b><i>作者 · ${fmtDate(a.mtime)}</i></div>
+      <span class="row-chev">${ICONS.chevron}</span>
     </button>`).join('');
 }
 
@@ -334,12 +545,12 @@ async function loadSeries(author) {
   const d = await api(`/api/tree/entries?author=${enc(author)}`);
   _saveScrollNow();
   state.entries = d.entries;
+  state.returnTo = null;
   state.breadcrumb = [author];
   state.curLevel = 1;
   state.scrollPosByLevel[1] = 0;
   resetSearch();
   app.innerHTML = browseShell();
-  bindSearch();
   renderBreadcrumb();
   renderSeries();
   _restoreScroll(0);
@@ -353,27 +564,19 @@ function renderSeries() {
   if (!list.length) { content.innerHTML = empty('无系列'); return; }
   content.innerHTML = list.map(e => {
     if (e.kind === 'ugoira') {
-      return `<button onclick="openUgoiraDirect('${esc(e.author)}','${esc(e.name)}')"
-        class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
-        <div class="w-10 h-10 rounded-md bg-purple-50 text-purple-500 flex items-center justify-center shrink-0">${ICONS.film}</div>
-        <div class="flex-1 min-w-0">
-          <div class="font-medium truncate">${esc(e.name)}</div>
-          <div class="text-xs text-gray-400">动图 · ${fmtDate(e.mtime)}</div>
-        </div>
-        <span class="text-gray-300">${ICONS.chevron}</span>
+      return `<button onclick="openUgoiraDirect('${esc(e.author)}','${esc(e.name)}')" class="row-item">
+        <div class="row-th">${ICONS.film}</div>
+        <div class="row-tx"><b>${esc(e.name)}</b><i>动图 · ${fmtDate(e.mtime)}</i></div>
+        <span class="row-chev">${ICONS.chevron}</span>
       </button>`;
     }
     const isFlat = e.kind === '_未分類' || e.kind === '_未分类';
     const label = isFlat ? '未分类' : '系列';
     const onclick = isFlat ? `loadImages('${esc(e.author)}','${esc(e.name)}')` : `loadCharacters('${esc(e.author)}','${esc(e.name)}')`;
-    return `<button onclick="${onclick}"
-      class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
-      <div class="w-10 h-10 rounded-md bg-pixiv-light text-pixiv-blue flex items-center justify-center shrink-0">${ICONS.folder}</div>
-      <div class="flex-1 min-w-0">
-        <div class="font-medium truncate">${esc(e.name)}</div>
-        <div class="text-xs text-gray-400">${label} · ${fmtDate(e.mtime)}</div>
-      </div>
-      <span class="text-gray-300">${ICONS.chevron}</span>
+    return `<button onclick="${onclick}" class="row-item">
+      <div class="row-th">${ICONS.folder}</div>
+      <div class="row-tx"><b>${esc(e.name)}</b><i>${label} · ${fmtDate(e.mtime)}</i></div>
+      <span class="row-chev">${ICONS.chevron}</span>
     </button>`;
   }).join('');
 }
@@ -382,12 +585,12 @@ async function loadCharacters(author, series) {
   const d = await api(`/api/tree/characters?author=${enc(author)}&series=${enc(series)}`);
   _saveScrollNow();
   state.characters = d.characters;
+  state.returnTo = null;
   state.breadcrumb = [author, series];
   state.curLevel = 2;
   state.scrollPosByLevel[2] = 0;
   resetSearch();
   app.innerHTML = browseShell();
-  bindSearch();
   renderBreadcrumb();
   renderCharacters();
   _restoreScroll(0);
@@ -400,18 +603,12 @@ function renderCharacters() {
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无角色'); return; }
   content.innerHTML = list.map(c => {
-    const icon = c.kind === 'ugoira'
-      ? '<div class="w-10 h-10 rounded-md bg-purple-50 text-purple-500 flex items-center justify-center shrink-0">' + ICONS.film + '</div>'
-      : '<div class="w-10 h-10 rounded-md bg-pixiv-light text-pixiv-blue flex items-center justify-center shrink-0">' + ICONS.image + '</div>';
+    const icon = `<div class="row-th">${c.kind === 'ugoira' ? ICONS.film : ICONS.image}</div>`;
     const cb = c.kind === 'ugoira' ? `openUgoiraDirect('${esc(c.author)}','${esc(c.name)}')` : `loadImages('${esc(c.author)}','${esc(c.series)}','${esc(c.name)}')`;
-    return `<button onclick="${cb}"
-      class="w-full text-left bg-white rounded-lg p-3 mb-2 border border-pixiv-border hover:shadow-sm transition flex items-center gap-3">
+    return `<button onclick="${cb}" class="row-item">
       ${icon}
-      <div class="flex-1 min-w-0">
-        <div class="font-medium truncate">${esc(c.name)}</div>
-        <div class="text-xs text-gray-400">${c.kind === 'ugoira' ? '动图' : '角色'} · ${fmtDate(c.mtime)}</div>
-      </div>
-      <span class="text-gray-300">${ICONS.chevron}</span>
+      <div class="row-tx"><b>${esc(c.name)}</b><i>${c.kind === 'ugoira' ? '动图' : '角色'} · ${fmtDate(c.mtime)}</i></div>
+      <span class="row-chev">${ICONS.chevron}</span>
     </button>`;
   }).join('');
 }
@@ -427,7 +624,6 @@ async function loadImages(author, series, character) {
   state.scrollPosByLevel[3] = 0;
   resetSearch();
   app.innerHTML = browseShell();
-  bindSearch();
   renderBreadcrumb();
   renderImages();
   _restoreScroll(0);
@@ -444,7 +640,7 @@ function renderImages() {
       ? `<div class="absolute top-1 right-1 w-5 h-5 rounded bg-black/60 text-white flex items-center justify-center">${ICONS.film}</div>`
       : '';
     return `<button onclick="openViewerAtByFile('${esc(im.file)}')" class="block w-full group relative">
-      <div class="bg-white rounded-lg overflow-hidden border border-pixiv-border">
+      <div class="tilecard">
         <div class="grid-img bg-pixiv-light overflow-hidden flex items-center justify-center">
           <img src="${thumb}" loading="lazy" class="w-full h-full object-cover group-active:scale-95 transition"
             onerror="this.parentElement.innerHTML='<div class=&quot;w-full h-full flex items-center justify-center text-gray-300 text-xs&quot;>无</div>'">
@@ -752,7 +948,6 @@ function closeViewer() {
   // 恢复原列表
   if (state.curLevel === 3 && state.images.length) {
     app.innerHTML = browseShell();
-    bindSearch();
     renderBreadcrumb();
     renderImages();
     _restoreScroll(state.scrollPosByLevel[3]);
@@ -852,17 +1047,16 @@ function renderDownload() {
   if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
   state.tasks = {};
   app.innerHTML = `
-    <div class="max-w-2xl mx-auto px-4 py-4">
-      <h2 class="text-lg font-semibold mb-4">下载作品</h2>
+    <div class="max-w-5xl mx-auto px-4 py-4">
       <div class="flex gap-2 mb-4">
-        <input id="dl-url" type="text" placeholder="粘贴 pixiv 链接 (artworks/{id})"
-          class="flex-1 px-3 py-2 rounded-lg border border-pixiv-border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-pixiv-blue/30">
-        <button id="dl-preview" onclick="doPreview()" class="px-4 py-2 rounded-lg bg-pixiv-blue text-white text-sm font-medium">预览</button>
+        <input id="dl-url" type="text" placeholder="粘贴 pixiv 链接 (artworks/{id})" class="field flex-1 min-w-0">
+        <button id="dl-preview" onclick="doPreview()" class="btn-primary">预览</button>
       </div>
       <div id="dl-result"></div>
-      <div id="dl-task-list" class="mt-4 space-y-3"></div>
+      <div id="dl-task-list" class="mt-4"></div>
     </div>`;
   // 拉取服务端已有任务（含快捷指令 API 触发的），渲染下载中/失败任务
+  syncChrome();
   loadServerTasks();
 }
 
@@ -900,7 +1094,7 @@ async function doPreview() {
     const p = await api('/api/download/preview/' + wid, { method: 'POST' });
     renderPreview(p);
   } catch (err) {
-    result.innerHTML = `<div class="text-red-500 text-sm bg-red-50 rounded-lg p-4">预览失败: ${esc(err.message)}</div>`;
+    result.innerHTML = `<div class="text-red-500 text-sm p-4" style="background:#FFF4F3;border-radius:var(--r-tile)">预览失败: ${esc(err.message)}</div>`;
   }
 }
 
@@ -910,23 +1104,23 @@ function renderPreview(p) {
   state.dlMode = 'tag';
   state.selectedTags = [];
   $('#dl-result').innerHTML = `
-    <div class="bg-white rounded-lg border border-pixiv-border p-4">
+    <div class="card p-4">
       <div class="flex items-start gap-3 mb-3">
-        <div class="w-12 h-12 rounded-lg bg-pixiv-light flex items-center justify-center text-pixiv-blue shrink-0">${p.is_ugoira ? ICONS.film : ICONS.image}</div>
-        <div class="flex-1 min-w-0">
-          <div class="font-medium truncate">${esc(p.title)}</div>
-          <div class="text-xs text-gray-400">by ${esc(p.userName)}</div>
-          <div class="flex gap-2 mt-1 flex-wrap">
-            ${r18 ? '<span class="text-xs bg-red-500 text-white rounded px-2 py-0.5">R-18</span>' : ''}
-            ${p.is_ugoira ? `<span class="text-xs bg-purple-500 text-white rounded px-2 py-0.5">动图 ${p.ugoira.frames}帧</span>` : ''}
-            <span class="text-xs bg-gray-100 rounded px-2 py-0.5">${p.pageCount}页</span>
+        <div class="row-th" style="width:var(--ctrl);height:var(--ctrl)">${p.is_ugoira ? ICONS.film : ICONS.image}</div>
+        <div class="row-tx">
+          <b>${esc(p.title)}</b>
+          <i>by ${esc(p.userName)}</i>
+          <div class="flex gap-1.5 mt-1.5 flex-wrap">
+            ${r18 ? '<span class="badge danger">R-18</span>' : ''}
+            ${p.is_ugoira ? `<span class="badge alt">动图 ${p.ugoira.frames}帧</span>` : ''}
+            <span class="badge">${p.pageCount} 页</span>
           </div>
         </div>
       </div>
       <div class="text-sm font-medium mb-2">归档方式</div>
       <div class="grid grid-cols-2 gap-2 mb-3">
-        <button id="mode-collection" onclick="setDlMode('collection')" class="px-3 py-2 rounded-lg border text-sm border-pixiv-border bg-white text-gray-600">Collection</button>
-        <button id="mode-tag" onclick="setDlMode('tag')" class="px-3 py-2 rounded-lg border text-sm bg-pixiv-blue text-white border-pixiv-blue">标签选择</button>
+        <button id="mode-collection" onclick="setDlMode('collection')" class="btn-ghost" style="width:100%">Collection</button>
+        <button id="mode-tag" onclick="setDlMode('tag')" class="btn-primary" style="width:100%">标签选择</button>
       </div>
       <div id="dl-mode-body">
         <div class="text-xs text-gray-500 mb-2">点击标签选择：首个 = 系列，其余 = 角色；「无系列」表示不设系列</div>
@@ -934,8 +1128,8 @@ function renderPreview(p) {
         <div id="pick-tip" class="text-xs text-gray-500 mb-4 min-h-4">未选择（将归档到 _未分类）</div>
       </div>
       <div class="flex gap-2">
-        <button id="dl-start" onclick="startDownload('${p.id}')" class="flex-1 px-4 py-3 rounded-lg bg-pixiv-blue text-white font-medium">开始下载</button>
-        <button onclick="renderDownload()" class="px-4 py-3 rounded-lg border border-pixiv-border text-sm">取消</button>
+        <button id="dl-start" onclick="startDownload('${p.id}')" class="btn-primary" style="flex:1">开始下载</button>
+        <button onclick="renderDownload()" class="btn-ghost">取消</button>
       </div>
     </div>`;
   renderTagPicker(p.tags);
@@ -947,13 +1141,13 @@ function setDlMode(mode) {
   const colBtn = $('#mode-collection');
   const tagBtn = $('#mode-tag');
   const body = $('#dl-mode-body');
-  const active = 'bg-pixiv-blue text-white border-pixiv-blue';
-  const idle = 'border-pixiv-border bg-white text-gray-600';
-  colBtn.className = `px-3 py-2 rounded-lg border text-sm ${mode === 'collection' ? active : idle}`;
-  tagBtn.className = `px-3 py-2 rounded-lg border text-sm ${mode === 'tag' ? active : idle}`;
+  const active = 'btn-primary', idle = 'btn-ghost';
+  colBtn.className = mode === 'collection' ? active : idle;
+  tagBtn.className = mode === 'tag' ? active : idle;
+  colBtn.style.width = '100%'; tagBtn.style.width = '100%';
   if (mode === 'collection') {
     body.innerHTML = `
-      <div class="text-xs text-gray-500 mb-4 bg-pixiv-light rounded-lg p-3">归档到 <span class="font-medium">Collections/${esc(p.id)}_${esc(p.title)}</span>。用于无系列/无正式名称角色（网络热梗、原创角色等）。若需按系列/角色归档请切换到「标签选择」。</div>`;
+      <div class="text-xs text-gray-500 mb-4 card p-3">归档到 <span class="font-medium">Collections/${esc(p.id)}_${esc(p.title)}</span>。用于无系列/无正式名称角色（网络热梗、原创角色等）。若需按系列/角色归档请切换到「标签选择」。</div>`;
   } else {
     body.innerHTML = `
       <div class="text-xs text-gray-500 mb-2">点击标签选择：首个 = 系列，其余 = 角色；「无系列」表示不设系列</div>
@@ -966,8 +1160,7 @@ function setDlMode(mode) {
 function renderTagPicker(tags) {
   const picker = $('#tag-picker');
   picker.innerHTML = [...tags, '无系列'].map(t => `
-    <button data-tag="${esc(t)}" class="chip px-3 py-1.5 rounded-full border border-pixiv-border bg-white text-xs text-gray-600"
-      onclick="toggleTag(this)">${esc(t)}</button>`).join('');
+    <button data-tag="${esc(t)}" class="chip" onclick="toggleTag(this)">${esc(t)}</button>`).join('');
   // 渲染已选状态
   state.selectedTags.forEach(t => {
     const el = picker.querySelector(`.chip[data-tag="${CSS.escape(t)}"]`);
@@ -1063,7 +1256,7 @@ function showTask(task, meta) {
   if (!list) return;
   const id = task.task_id;
   const div = document.createElement('div');
-  div.className = 'bg-white rounded-lg border border-pixiv-border p-4';
+  div.className = 'card p-4 mb-3';
   div.innerHTML = `
     <div class="flex items-center justify-between mb-2">
       <div class="font-medium text-sm">作品 ${esc(task.work_id)}</div>
@@ -1072,9 +1265,9 @@ function showTask(task, meta) {
     <div class="h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
       <div class="task-bar h-full bg-pixiv-blue transition-all" style="width:0%"></div>
     </div>
-    <div class="task-log text-xs text-gray-500 max-h-32 overflow-auto bg-gray-50 rounded p-2 font-mono"></div>
+    <div class="task-log text-xs text-gray-500 max-h-32 overflow-auto bg-gray-50 font-mono" style="border-radius:var(--r-tile);padding:8px"></div>
     <div class="flex gap-2 mt-2 task-actions">
-      <button class="task-cancel px-3 py-1.5 rounded border border-red-200 text-red-500 text-xs">取消</button>
+      <button class="task-cancel btn-danger">取消</button>
     </div>`;
   list.insertBefore(div, list.firstChild);  // 新任务置顶
   const entry = {
@@ -1124,13 +1317,14 @@ function updateTaskUI(id, t) {
   if (!entry) return;
   const pct = t.total > 0 ? Math.round(t.progress / t.total * 100) : 0;
   entry.barEl.style.width = pct + '%';
-  let label = t.status;
+  let label;
   if (t.status === 'running') label = `${pct}%`;
-  else if (t.status === 'done') label = '✅ 完成 → ' + (t.target || '');
-  else if (t.status === 'error') label = '❌ ' + (t.error || '失败');
+  else if (t.status === 'done') label = `<span style="color:var(--ok);margin-right:2px">${ICONS.check}</span>完成 → ${esc(t.target || '')}`;
+  else if (t.status === 'error') label = `<span style="color:var(--danger);margin-right:2px">${ICONS.x}</span>${esc(t.error || '失败')}`;
   else if (t.status === 'cancelled') label = '已取消';
   else if (t.status === 'queued') label = '排队中…';
-  entry.statusEl.textContent = label;
+  else label = esc(String(t.status));
+  entry.statusEl.innerHTML = label;
   if (t.log && t.log.length) {
     entry.logEl.innerHTML = t.log.map(l => esc(l)).join('<br>');
     entry.logEl.scrollTop = entry.logEl.scrollHeight;
@@ -1144,7 +1338,7 @@ function updateTaskUI(id, t) {
     if (t.status === 'error' && entry.meta && entry.meta.url) {
       if (!entry.retryBtn) {
         const btn = document.createElement('button');
-        btn.className = 'px-3 py-1.5 rounded border border-pixiv-blue text-pixiv-blue text-xs';
+        btn.className = 'btn-accent-ghost';
         btn.textContent = '重试';
         btn.onclick = () => retryTask(entry.meta);
         entry.actionsEl.appendChild(btn);
@@ -1177,7 +1371,7 @@ async function clearTask(taskId) {
 }
 
 function divOf(entry) {
-  return entry.actionsEl ? entry.actionsEl.closest('.bg-white.rounded-lg') : null;
+  return entry.actionsEl ? entry.actionsEl.closest('.card') : null;
 }
 
 function retryTask(meta) {
@@ -1203,31 +1397,31 @@ async function renderSettings() {
   const d = await api('/api/config');
   const cfg = d.config;
   app.innerHTML = `
-    <div class="max-w-2xl mx-auto px-4 py-4">
-      <h2 class="text-lg font-semibold mb-4">设置</h2>
-      <div class="bg-white rounded-lg border border-pixiv-border p-4 mb-4">
+    <div class="max-w-5xl mx-auto px-4 py-4">
+      <div class="card p-4 mb-4">
         <div class="font-medium mb-3">网络代理</div>
         <div class="grid grid-cols-3 gap-2 mb-3">
-          <select id="cfg-scheme" class="px-2 py-2 rounded-lg border border-pixiv-border text-sm bg-white">
+          <select id="cfg-scheme" class="field">
             <option value="">直连</option><option value="http">HTTP</option>
             <option value="https">HTTPS</option><option value="socks5">SOCKS5</option>
           </select>
-          <input id="cfg-host" placeholder="host" value="${esc(cfg.proxy.host)}" class="px-2 py-2 rounded-lg border border-pixiv-border text-sm">
-          <input id="cfg-port" placeholder="port" value="${esc(cfg.proxy.port)}" class="px-2 py-2 rounded-lg border border-pixiv-border text-sm">
+          <input id="cfg-host" placeholder="host" value="${esc(cfg.proxy.host)}" class="field">
+          <input id="cfg-port" placeholder="port" value="${esc(cfg.proxy.port)}" class="field">
         </div>
-        <button onclick="saveConfig()" class="px-4 py-2 rounded-lg bg-pixiv-blue text-white text-sm">保存配置</button>
+        <button onclick="saveConfig()" class="btn-primary">保存配置</button>
       </div>
-      <div class="bg-white rounded-lg border border-pixiv-border p-4 mb-4">
+      <div class="card p-4 mb-4">
         <div class="font-medium mb-2">cookies 状态</div>
-        <div id="cookie-status">${d.cookies.ok ? 'cookies 有效' : 'cookies 无效: ' + esc(d.cookies.reason)}</div>
+        <div id="cookie-status" class="text-sm text-gray-500">${d.cookies.ok ? 'cookies 有效' : 'cookies 无效: ' + esc(d.cookies.reason)}</div>
       </div>
-      <div class="bg-white rounded-lg border border-pixiv-border p-4">
+      <div class="card p-4">
         <div class="font-medium mb-2">数据目录</div>
         <div class="text-sm text-gray-500 break-all">${esc(d.root)}</div>
       </div>
     </div>`;
   const s = document.getElementById('cfg-scheme');
-  s.value = cfg.proxy.scheme || '';
+  if (s) s.value = cfg.proxy.scheme || '';
+  syncChrome();
 }
 
 async function saveConfig() {

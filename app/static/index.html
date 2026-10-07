@@ -19,73 +19,313 @@ tailwind.config = {
   theme: {
     extend: {
       colors: {
-        pixiv: {
-          blue: '#0096FA',
-          light: '#F5F8FB',
-          dark: '#212121',
-          border: '#E5E9ED',
-        }
+        pixiv: { blue: '#0096FA', light: '#F5F8FB', dark: '#212121', border: '#E5E9ED' }
       }
     }
   }
 }
 </script>
 <style>
-  html, body { height: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
-  /* Viewer.js 容器背景统一为纯黑（默认 backdrop 是半透明） */
+  :root{
+    --accent:#0096FA;
+    --ink:#1C1C1E; --ink2:#8A8A8E; --ink3:#C7C7CC;
+    --bg:#F5F8FB;          /* 与 tailwind pixiv.light 同源 */
+    --glass:rgba(255,255,255,.72);
+    --glass-line:rgba(0,0,0,.06);
+    --hairline:#E5E9ED;
+    --sel:rgba(120,120,128,.16);
+
+    /* ===== 组件尺寸 token（唯一来源；按 iOS 相册实测的相对关系推导） =====
+       基准 = --ctrl（次级控件高，iOS 44pt）
+       --dock 为底部胶囊「整体」高（含内边距）；搜索钮与之同高（iOS 相册实测）
+       图标按容器比例取，不单独拍数 */
+    --r:9999px;
+    --ctrl:44px;                       /* 返回/⋯/菜单项/面包屑/chip/输入框/取消钮 */
+    --dock:62px;                       /* 底部胶囊整体高（含 padding） */
+    --dock-pad:5px;                    /* 胶囊内边距（视觉高度不再虚胖） */
+    --dock-seg:calc(var(--dock) - var(--dock-pad) * 2);
+    --fab:var(--dock);                 /* 搜索圆钮 = 胶囊高 */
+    --seg-w:76px;                      /* 胶囊段最小宽 */
+    --ico-ctrl:calc(var(--ctrl) / 2);          /* 22 */
+    --ico-dock:calc(var(--dock) * .39);        /* 24 */
+    --ico-fab:calc(var(--fab) * .39);          /* 24 */
+    --ctrl-sm:36px;                    /* 内容内次级 chip（面包屑/标签/历史）：iOS 32–36 */
+    --card-r:18px;                     /* 内容卡片圆角 */
+    --r-tile:14px;                     /* 图片格圆角 */
+    --ok:#2E7D4F; --danger:#D6363C;    /* 语义色 */
+    --fs-chip:13px; --fs-label:11px; --fs-input:16px; --fs-title:20px; --fs-sm:12px
+  }
+  html, body { height: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: rgba(0,0,0,.06); }
+  body { background: var(--bg); }
   .viewer-container { background-color: #000; }
-  /* iOS 安全区：底部留白（tabbar 高度 + Home 指示条） */
-  #app { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
-  .tabbar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
-            background: rgba(255,255,255,0.95); backdrop-filter: blur(8px);
-            border-top: 1px solid theme('colors.pixiv.border');
-            padding-bottom: env(safe-area-inset-bottom); }
-  @media (min-width: 768px) {
-    .tabbar { top: 0; bottom: auto; padding-bottom: 0; border-top: none;
-              border-bottom: 1px solid theme('colors.pixiv.border');
-              padding-top: env(safe-area-inset-top); }
-    #app { padding-bottom: 0; padding-top: calc(56px + env(safe-area-inset-top)); }
-    /* 桌面端 tabbar 在顶部，面包屑/搜索框 sticky 需让出 tabbar 高度 */
-    .sticky-bc { top: calc(56px + env(safe-area-inset-top)) !important; }
+
+  /* 内容让出固定 chrome（上下留白按 token 推导，无额外堆叠） */
+  #app {
+    padding-top: calc(10px + var(--ctrl) + 8px + env(safe-area-inset-top));
+    padding-bottom: calc(12px + var(--dock) + 16px + env(safe-area-inset-bottom));
   }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  /* 触屏操作元素禁用文本选择 */
-  button, .tabbar, .chip, img, #viewer, #content, #breadcrumb {
-    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+
+  .glass{
+    background:var(--glass);
+    backdrop-filter:blur(20px) saturate(180%);
+    -webkit-backdrop-filter:blur(20px) saturate(180%);
+    border:1px solid var(--glass-line);
+    box-shadow:0 10px 30px rgba(23,32,45,.14), inset 0 1px 0 rgba(255,255,255,.65);
   }
-  .chip-on { background: #0096FA !important; color: #fff !important; border-color: #0096FA !important; }
-  .chip-series { background: #0096FA !important; color: #fff !important; border-color: #0096FA !important; }
-  .chip-character { background: #E8F5FD !important; color: #0096FA !important; border-color: #0096FA !important; }
-  .chip-series::after { content: ' 系列'; font-size: 0.6rem; opacity: 0.8; }
-  .chip-character::after { content: ' 角色'; font-size: 0.6rem; opacity: 0.8; }
+  .ico{ display:block; }
+
+  /* ===== 固定 chrome 与内容同栏对齐（max-w-5xl + px-4，与 #app 内容一致） ===== */
+  .chrome-col{ max-width:64rem; margin:0 auto; padding:0 1rem; display:flex; align-items:center; justify-content:space-between; }
+  /* 顶部 affix：实色 → 透明 渐变（+同遮罩的减速模糊），避免滚动内容与文字直接相压。
+     注意：渐变/模糊/遮罩必须放在 ::before 上——若放在 #chrome-top 本体，
+     mask 会连同子元素（⋯ 气泡）一起被遮掉 → 气泡看起来“坏掉”。 */
+  #chrome-top{
+    position:fixed; z-index:59; left:0; right:0; top:0;
+    padding: calc(10px + env(safe-area-inset-top)) 0 16px;
+    pointer-events:none;
+  }
+  #chrome-top::before{
+    content:""; position:absolute; inset:0; z-index:-1; pointer-events:none;
+    background: linear-gradient(to bottom, var(--bg) 0%, var(--bg) 58%, rgba(245,248,251,0) 100%);
+    -webkit-backdrop-filter: blur(6px) saturate(150%);
+    backdrop-filter: blur(6px) saturate(150%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 58%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0, #000 58%, transparent 100%);
+  }
+  .chrome-left{ display:flex; align-items:center; gap:8px; min-width:0; }
+  .chrome-btn{
+    width:var(--ctrl); height:var(--ctrl); border-radius:var(--r);
+    display:flex; align-items:center; justify-content:center; color:var(--ink); pointer-events:auto;
+  }
+  .chrome-btn .ico{ width:var(--ico-ctrl); height:var(--ico-ctrl); }
+  .chrome-btn[disabled]{ opacity:.35; }
+
+  /* 顶层标题（有返回时不显示） */
+  #page-title{
+    display:flex; align-items:center; height:var(--ctrl); min-width:0;
+    font-size:var(--fs-title); font-weight:700; letter-spacing:-.01em; color:var(--ink); white-space:nowrap;
+  }
+
+  /* ⋯ popover（选择器必须用 #menu-pop：元素没有 class="menu-pop"） */
+  .menu-wrap{ position:relative; pointer-events:auto; }
+  #menu-pop{
+    position:absolute; z-index:61; right:0; top:calc(100% + 8px); width:200px; padding:6px; border-radius:18px; display:none;
+    pointer-events:auto;
+  }
+  #menu-pop .mi{
+    display:flex; align-items:center; gap:9px; width:100%; height:var(--ctrl); padding:0 12px;
+    border-radius:13px; font-size:var(--fs-chip); font-weight:600; color:#3C4653; text-align:left;
+  }
+  #menu-pop .mi .k{ flex:1; }
+  #menu-pop .mi.on .k{ color:var(--accent); }
+  /* 选中态用「纯色图标」表达，不用 badge */
+  #menu-pop .mi.on .mic{ color:var(--accent); }
+  #menu-pop .mi.on .mic svg{ stroke-width:2.4; }
+  #menu-pop .mic{ display:flex; color:var(--ink2); }
+  #menu-pop .msep{ height:1px; background:rgba(0,0,0,.08); margin:5px 8px; }
+
+  /* ===== 底部固定层（与内容同栏） ===== */
+  #chrome-bottom{
+    position:fixed; z-index:60; left:0; right:0;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    pointer-events:none;
+  }
+
+  /* ===== 底部左：导航胶囊（选中 = 浅灰胶囊 + accent） ===== */
+  #tabbar{
+    position:relative; padding:var(--dock-pad); border-radius:var(--r); display:flex; gap:4px; pointer-events:auto;
+    /* 用 inset 阴影画发丝边，避免 1px border 让整体高 +2（视觉高度须严格 = --dock） */
+    border:none;
+    box-shadow:0 10px 30px rgba(23,32,45,.14), inset 0 0 0 1px var(--glass-line), inset 0 1px 0 rgba(255,255,255,.65);
+  }
+  #tabbar .seg{
+    position:relative; z-index:2; height:var(--dock-seg); min-width:var(--seg-w); padding:4px 14px;
+    border-radius:var(--r); display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:2px; font-size:var(--fs-label); font-weight:600; color:var(--ink); white-space:nowrap;
+  }
+  #tabbar .seg .ic{ width:var(--ico-dock); height:var(--ico-dock); }
+  #tabbar .seg.on{ color:var(--accent); }
+  #tab-pill{
+    position:absolute; z-index:1; left:0; top:var(--dock-pad); height:var(--dock-seg); width:var(--seg-w);
+    border-radius:var(--r); background:var(--sel);
+    transition: transform .22s cubic-bezier(.2,.8,.2,1), width .22s cubic-bezier(.2,.8,.2,1);
+  }
+
+  /* ===== 底部右：搜索圆钮 ===== */
+  #btn-search{
+    width:var(--fab); height:var(--fab); border-radius:var(--r);
+    display:flex; align-items:center; justify-content:center; pointer-events:auto;
+    background:rgba(255,255,255,.92);
+    border:1px solid var(--glass-line);
+    box-shadow:0 10px 30px rgba(23,32,45,.18), inset 0 1px 0 rgba(255,255,255,.7);
+  }
+  #btn-search .ic{ width:var(--ico-fab); height:var(--ico-fab); color:var(--ink); }
+
+  /* ===== 内容内面包屑（随内容滚动） ===== */
+  .bc{
+    display:flex; align-items:center; gap:6px; overflow-x:auto; margin:8px 0; padding:0;
+    -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent 100%);
+    mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent 100%);
+  }
+  .bc::-webkit-scrollbar{ display:none; }
+  .bc-c{
+    display:inline-flex; align-items:center; gap:6px; height:var(--ctrl-sm); padding:0 14px; border-radius:var(--r);
+    font-size:var(--fs-chip); font-weight:600; white-space:nowrap; flex:0 0 auto;
+    background:rgba(120,120,128,.13); color:var(--ink2);
+  }
+  .bc-c .ico{ width:14px; height:14px; }
+  .bc-c.now{ background:var(--sel); color:var(--accent); }
+  .bc-c.root{ background:rgba(120,120,128,.13); color:var(--ink); }
+  .bc-s{ color:var(--ink3); font-size:12px; flex:0 0 auto; }
+
+  /* ===== 搜索视图：底部（输入框与取消钮各自独立，无外层容器打底） ===== */
+  #search-bar{
+    position:fixed; z-index:60; left:0; right:0; max-width:64rem; margin:0 auto; padding:0 1rem;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    display:flex; gap:8px; align-items:center;
+  }
+  .sfield{ position:relative; flex:1; min-width:0; }
+  .sfield .sico{ position:absolute; left:15px; top:50%; transform:translateY(-50%); color:var(--ink2); display:flex; z-index:1; }
+  .sfield .sico .ico{ width:17px; height:17px; }
+  .sfield input{
+    width:100%; height:var(--ctrl); border-radius:var(--r); border:1px solid var(--glass-line);
+    background:var(--glass); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%);
+    box-shadow:0 10px 30px rgba(23,32,45,.14), inset 0 1px 0 rgba(255,255,255,.65);
+    padding:0 46px 0 42px; font-size:var(--fs-input); color:var(--ink); outline:none;
+  }
+  .sfield input::placeholder{ color:#9AA0A8; }
+  .sclr{
+    position:absolute; right:0; top:0; width:var(--ctrl); height:var(--ctrl);
+    display:none; align-items:center; justify-content:center; background:transparent; color:#fff;
+  }
+  .sclr .ico{ width:18px; height:18px; padding:3px; border-radius:50%; background:rgba(120,120,128,.4); }
+  #search-cancel{
+    width:var(--ctrl); height:var(--ctrl); border-radius:var(--r); flex:0 0 auto;
+    display:flex; align-items:center; justify-content:center; color:var(--ink);
+    background:var(--glass); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%);
+    border:1px solid var(--glass-line); box-shadow:0 10px 30px rgba(23,32,45,.14), inset 0 1px 0 rgba(255,255,255,.65);
+  }
+  #search-cancel .ico{ width:18px; height:18px; }
+
+  .sect{ font-size:12px; font-weight:700; color:#6B7480; margin:14px 2px 8px; }
+  .chips{ display:flex; flex-wrap:wrap; gap:8px; }
+  .chip{
+    display:inline-flex; align-items:center; height:var(--ctrl-sm); padding:0 14px; border-radius:var(--r);
+    background:rgba(255,255,255,.92); border:1px solid var(--hairline); font-size:var(--fs-chip); color:#3C4653;
+  }
+  .linkbtn{ margin-top:12px; height:var(--ctrl-sm); padding:0 14px; border-radius:var(--r); font-size:var(--fs-chip); color:var(--ink2); }
+  .empty-hint{ text-align:center; color:#95A0AC; font-size:13px; padding:34px 0; }
+
+  /* ===== 内容区组件规范（HIG 不规定内容组件，此处自定并全局统一） ===== */
+  .card{ background:#fff; border:1px solid var(--hairline); border-radius:var(--card-r); }
+  .tilecard{ background:#fff; border:1px solid var(--hairline); border-radius:var(--r-tile); overflow:hidden; }
+  .row-item{
+    display:flex; align-items:center; gap:12px; width:100%; text-align:left; margin-bottom:8px;
+    background:#fff; border:1px solid var(--hairline); border-radius:16px; padding:12px 14px;
+  }
+  .row-item:active{ background:#FAFBFC; }
+  .row-th{ width:40px; height:40px; border-radius:11px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--accent); }
+  .row-tx{ flex:1; min-width:0; }
+  .row-tx b{ display:block; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row-tx i{ font-style:normal; display:block; font-size:var(--fs-sm); color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row-chev{ color:var(--ink3); flex:0 0 auto; display:flex; }
+  .field{
+    width:100%; height:var(--ctrl); border-radius:var(--r); border:1px solid var(--hairline);
+    background:#fff; padding:0 16px; font-size:var(--fs-input); color:var(--ink); outline:none;
+  }
+  .field::placeholder{ color:#9AA0A8; }
+  .btn-primary{
+    display:inline-flex; align-items:center; justify-content:center; height:var(--ctrl); padding:0 18px;
+    border-radius:var(--r); background:var(--accent); color:#fff; font-size:var(--fs-chip); font-weight:600; flex:0 0 auto;
+  }
+  .btn-ghost{
+    display:inline-flex; align-items:center; justify-content:center; height:var(--ctrl); padding:0 16px;
+    border-radius:var(--r); background:#fff; border:1px solid var(--hairline); color:#3C4653; font-size:var(--fs-chip); font-weight:600; flex:0 0 auto;
+  }
+  .btn-danger{
+    display:inline-flex; align-items:center; justify-content:center; height:var(--ctrl-sm); padding:0 14px;
+    border-radius:var(--r); background:#fff; border:1px solid #F3C9C5; color:var(--danger); font-size:var(--fs-sm); font-weight:600; flex:0 0 auto;
+  }
+  .btn-accent-ghost{
+    display:inline-flex; align-items:center; justify-content:center; height:var(--ctrl-sm); padding:0 14px;
+    border-radius:var(--r); background:#fff; border:1px solid var(--accent); color:var(--accent); font-size:var(--fs-sm); font-weight:600; flex:0 0 auto;
+  }
+  .tagchip{
+    display:inline-flex; align-items:center; height:var(--ctrl-sm); padding:0 12px; border-radius:var(--r);
+    background:#fff; border:1px solid var(--hairline); font-size:var(--fs-sm); color:#3C4653;
+  }
+  /* 状态徽标（R-18 / 帧数 / 页数）：小、非胶囊、不撑版 */
+  .badge{
+    display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:6px;
+    background:#F1F3F5; color:#5B6470; font-size:11px; font-weight:600; line-height:1; white-space:nowrap;
+  }
+  .badge.danger{ background:var(--danger); color:#fff; }
+  .badge.alt{ background:#E8F5FD; color:var(--accent); }
+  /* 标签选择器状态（renderTagPicker 依赖） */
+  .chip-on, .chip-series{ background:var(--accent) !important; color:#fff !important; border-color:var(--accent) !important; }
+  .chip-character{ background:#E8F5FD !important; color:var(--accent) !important; border-color:var(--accent) !important; }
+  .chip-series::after{ content:' 系列'; font-size:.6rem; opacity:.85; }
+  .chip-character::after{ content:' 角色'; font-size:.6rem; opacity:.85; }
+
   .skeleton { animation: pulse 1.5s ease-in-out infinite; background: #eee; border-radius: 8px; }
   @keyframes pulse { 0%,100% {opacity:1} 50% {opacity:0.4} }
   input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
   .grid-img { aspect-ratio: 1 / 1; }
-  .fade-in { animation: fadeIn 0.25s ease-out; }
+  .fade-in { animation: fadeIn .22s ease-out; }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  button, #tabbar, .bc, img, #viewer { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #tab-pill { transition: none; }
+    .fade-in { animation: none; }
+  }
 </style>
 </head>
 <body class="bg-pixiv-light text-pixiv-dark">
 <div id="app"></div>
 
-<!-- 底部导航（SVG 图标） -->
-<nav class="tabbar grid grid-cols-3">
-  <button id="nav-browse" class="py-2 text-center text-sm font-medium text-pixiv-blue border-t-2 border-pixiv-blue" onclick="showView('browse')">
-    <svg class="w-6 h-6 mx-auto mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.5-3.5L6 21"/></svg>
-    浏览
-  </button>
-  <button id="nav-download" class="py-2 text-center text-sm font-medium text-gray-400 border-t-2 border-transparent" onclick="showView('download')">
-    <svg class="w-6 h-6 mx-auto mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
-    下载
-  </button>
-  <button id="nav-settings" class="py-2 text-center text-sm font-medium text-gray-400 border-t-2 border-transparent" onclick="showView('settings')">
-    <svg class="w-6 h-6 mx-auto mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    设置
-  </button>
-</nav>
+<!-- 固定 chrome（与内容同栏对齐）：左上 返回/标题，右上 ⋯ -->
+<div id="chrome-top">
+  <div class="chrome-col">
+    <div class="chrome-left">
+      <button id="btn-back" class="chrome-btn glass" onclick="goBack()" title="返回" aria-label="返回">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div id="page-title"></div>
+    </div>
+    <div class="menu-wrap">
+      <button id="btn-menu" class="chrome-btn glass" onclick="toggleMenu()" title="更多" aria-label="更多">
+        <svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5.5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="18.5" cy="12" r="1.9"/></svg>
+      </button>
+      <div id="menu-pop" class="glass"></div>
+    </div>
+  </div>
+</div>
 
-<script src="/app.js?v=20260904a"></script>
+<!-- 固定 chrome（与内容同栏对齐）：底部左 导航胶囊，底部右 搜索圆钮 -->
+<div id="chrome-bottom">
+  <div class="chrome-col" style="align-items:flex-end">
+    <nav id="tabbar" class="glass">
+      <span id="tab-pill"></span>
+      <button class="seg" data-view="browse" onclick="showView('browse')">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.8" cy="8.8" r="1.8"/><path d="m21 15.5-3.6-3.6L6 23"/></svg>
+        浏览
+      </button>
+      <button class="seg" data-view="download" onclick="showView('download')">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="m7.5 10 4.5 4.5L16.5 10"/><path d="M4 20h16"/></svg>
+        下载
+      </button>
+      <button class="seg" data-view="settings" onclick="showView('settings')">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        设置
+      </button>
+    </nav>
+    <button id="btn-search" onclick="openSearch()" title="搜索" aria-label="搜索">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.2-4.2"/></svg>
+    </button>
+  </div>
+</div>
+
+<script src="/app.js?v=20261007b"></script>
 </body>
 </html>

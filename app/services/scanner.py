@@ -395,3 +395,11 @@ def search_index(q: str, limit: int = 200):
             rank = 0 if (ec == key or es == key) else 1
             (exact if rank == 0 else fuzzy).append(e)
     return (exact + fuzzy)[:limit]
+
+
+def random_entry():
+    """从全库索引随机取一个 {author, series, character, nfile}（索引未就绪返回 None）。"""
+    import random
+    with _INDEX_LOCK:
+        entries = list(_INDEX or [])
+    return random.choice(entries) if entries else None

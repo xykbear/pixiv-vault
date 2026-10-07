@@ -106,6 +106,15 @@ def api_search(q: str, limit: int = 200):
     return {"state": "ready", "results": scanner.search_index(q, limit)}
 
 
+@app.get("/api/random")
+def api_random():
+    """随机角色（⋯ 菜单）：索引未就绪时返回 state，前端轮询后跳转。"""
+    state = scanner.ensure_index()
+    if state != "ready":
+        return {"state": state, "item": None}
+    return {"state": "ready", "item": scanner.random_entry()}
+
+
 @app.get("/api/thumb/file")
 def api_thumb_file(request: Request, rel: str):
     full = os.path.join(config.get_root(), rel)
