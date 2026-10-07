@@ -61,6 +61,8 @@ function cleanupViewerOnTabSwitch() {
   _ugCancel = true;
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
   if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
+  _ugAbortPending();
+  _ugImgs = []; _ugFrameData = [];  // 释放预加载帧内存
   if (_viewer) { try { _viewer.destroy(); } catch (e) {} _viewer = null; }
   state.viewer = null;
 }
@@ -538,7 +540,9 @@ function renderViewer() {
     scalable: false,
     transition: false,
     fullscreen: false,
-    keyboard: true,
+    // 键盘统一由 app.js 的 document keydown 路由（静态/动图共用）。
+    // 关闭 Viewer.js 自带键盘，避免与自定义处理器叠加导致 ←/→ 一次跳两张。
+    keyboard: false,
     viewed(e) {
       const idx = e.detail.index;
       $('#v-count').textContent = `${idx + 1}/${v.pages.list.length}`;
@@ -567,7 +571,15 @@ let _ugPaused = false;  // 动图暂停状态
 let _ugList = [];      // 当前播放器动图列表
 let _ugIdx = 0;        // 当前动图索引
 let _ugFrameData = []; // 当前动图 frames
+let _ugImgs = [];      // 预加载帧 Image[]（播放零网络；生命周期=播放器，切换/关闭即释放）
+let _ugPending = [];   // 预加载中的 Image（切换/关闭时置 src='' 中止在途请求）
 let _ugGen = 0;        // 加载代际计数（滑动切换时使旧请求失效）
+
+// 中止在途的帧预加载（置 src='' 让浏览器取消请求），并清空引用
+function _ugAbortPending() {
+  _ugPending.forEach(im => { try { im.src = ''; } catch (e) {} });
+  _ugPending = [];
+}
 
 function toggleUgoiraPause() {
   if (!_ugActive) return;
@@ -600,6 +612,8 @@ function openUgoiraPlayer(ugList, idx) {
   _ugList = ugList;
   _ugIdx = idx;
   _ugFrameData = [];
+  _ugImgs = [];
+  _ugAbortPending();
   app.innerHTML = `
     <div id="viewer" class="fixed inset-0 bg-black z-[2025] overflow-hidden">
       <div id="v-stage" class="w-full h-full flex items-center justify-center touch-pan-y"></div>
@@ -620,6 +634,8 @@ function loadUgoiraAt(idx) {
   const gen = ++_ugGen;
   _ugIdx = idx;
   _ugPaused = false;
+  _ugImgs = [];  // 释放上一部动图的预加载帧
+  _ugAbortPending();  // 中止上一部动图在途的帧请求
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
   const item = _ugList[idx];
   const stage = $('#v-stage');
@@ -629,29 +645,35 @@ function loadUgoiraAt(idx) {
   const cntEl = $('#v-count');
   if (cntEl) cntEl.textContent = `${idx + 1}/${_ugList.length}`;
   const qs = `author=${enc(item.author)}&base=${enc(item.id)}&series=${enc(item.series || '')}&character=${enc(item.character || '')}`;
+  const frameUrl = (f) => `/api/ugoira/frame?${qs}&file=${enc(f.file)}`;
   fetch(`/api/ugoira/frames?${qs}`)
     .then(res => { if (!res.ok) throw new Error('frames 请求失败'); return res.json(); })
     .then(frames => {
       if (_ugCancel || gen !== _ugGen || !Array.isArray(frames) || frames.length === 0) throw new Error('无帧数据');
       _ugFrameData = frames;
       stage.innerHTML = `<div class="text-white p-6 text-center"><canvas id="v-canvas"></canvas></div>`;
-      const canvas = $('#v-canvas');
-      const ctx = canvas.getContext('2d');
-      const img = new Image();
-      img.src = `/api/ugoira/frame?${qs}&file=${enc(frames[0].file)}`;
-      return new Promise((res, rej) => {
-        img.onload = () => res({ frames, img, canvas, ctx });
-        img.onerror = () => rej(new Error('首帧加载失败'));
-      });
+      // 预加载全部帧到内存 Image：播放期间零网络请求（生命周期=播放器实例，切换/关闭即释放）。
+      // 帧响应带 Cache-Control/ETag（见 app/main.py），跨次打开走浏览器缓存/304。
+      return Promise.all(frames.map(f => new Promise((res, rej) => {
+        const im = new Image();
+        _ugPending.push(im);
+        im.onload = () => res(im);
+        im.onerror = () => rej(new Error('帧加载失败: ' + f.file));
+        im.src = frameUrl(f);
+      })));
      })
-    .then(({ frames, img, canvas, ctx }) => {
+    .then(imgs => {
       if (_ugCancel || gen !== _ugGen) return;
-      const W = img.naturalWidth, H = img.naturalHeight;
+      _ugPending = [];  // 已全部加载，脱离中止集合（勿与 _ugImgs 重引用）
+      const canvas = $('#v-canvas');
+      if (!canvas) return;
+      const W = imgs[0].naturalWidth, H = imgs[0].naturalHeight;
       const maxW = window.innerWidth - 32, maxH = window.innerHeight * 0.6;
       const r = Math.min(maxW / W, maxH / H, 1);
       canvas.width = W; canvas.height = H;
       canvas.style.width = (W * r) + 'px'; canvas.style.height = (H * r) + 'px';
-      ctx.drawImage(img, 0, 0, W, H);
+      canvas.getContext('2d').drawImage(imgs[0], 0, 0, W, H);  // 首帧（单帧动图也显示）
+      _ugImgs = imgs;
       _ugPlay();
     })
     .catch(err => {
@@ -659,38 +681,26 @@ function loadUgoiraAt(idx) {
     });
 }
 
-// 动图帧播放调度（从当前 _ugFrameData/_ugIdx 播放，暂停后恢复也走这里）
+// 动图帧播放调度（从内存预加载帧绘制，零网络；暂停后恢复也走这里）
 function _ugPlay() {
   if (_ugCancel || _ugPaused) return;
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
-  const item = _ugList[_ugIdx];
   const canvas = $('#v-canvas');
-  if (!item || !canvas) return;
-  const ctx = canvas.getContext('2d');
   const frames = _ugFrameData;
-  if (!frames || frames.length < 2) return;
+  const imgs = _ugImgs;
+  if (!canvas || !frames || frames.length < 2 || imgs.length !== frames.length) return;
+  const ctx = canvas.getContext('2d');
   const gen = _ugGen;
-  const W = canvas.width, H = canvas.height;
-  const qs = `author=${enc(item.author)}&base=${enc(item.id)}&series=${enc(item.series || '')}&character=${enc(item.character || '')}`;
-  const img = new Image();
-  let fi = 1;
-  let loading = false;
-  const tick = () => {
+  let fi = 1 % frames.length;  // 首帧已由 loadUgoiraAt 绘制
+  const step = () => {
     if (_ugCancel || _ugPaused || gen !== _ugGen) return;
-    if (loading) return;
-    loading = true;
-    ctx.drawImage(img, 0, 0, W, H);
-    const nf = frames[fi];
+    const im = imgs[fi];
+    if (im) ctx.drawImage(im, 0, 0, canvas.width, canvas.height);
+    const delay = frames[fi].delay || 120;
     fi = (fi + 1) % frames.length;
-    img.onload = () => { loading = false; if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, nf.delay || 120); };
-    img.onerror = () => { loading = false; if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, nf.delay || 120); };
-    img.src = `/api/ugoira/frame?${qs}&file=${enc(nf.file)}`;
+    _ugTimer = setTimeout(step, delay);
   };
-  img.onload = () => {
-    ctx.drawImage(img, 0, 0, W, H);
-    if (!_ugCancel && !_ugPaused && gen === _ugGen) _ugTimer = setTimeout(tick, frames[1].delay || 120);
-  };
-  img.src = `/api/ugoira/frame?${qs}&file=${enc(frames[1].file)}`;
+  _ugTimer = setTimeout(step, frames[0].delay || 120);
 }
 
 function bindUgoiraGestures(stage) {
@@ -721,6 +731,8 @@ function closeViewer() {
   _ugActive = false;
   _ugPaused = false;
   if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
+  _ugAbortPending();  // 中止在途帧请求
+  _ugImgs = []; _ugFrameData = [];  // 释放预加载帧内存
   if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
   destroyViewer();
   state.viewer = null;
@@ -755,8 +767,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!state.viewer) return;
-  if (e.key === 'ArrowRight') nextPage();
-  if (e.key === 'ArrowLeft') prevPage();
+  if (e.key === 'ArrowRight') { e.preventDefault(); nextPage(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); prevPage(); }
   if (e.key === 'Escape') hideViewer();
 });
 

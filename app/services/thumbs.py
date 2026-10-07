@@ -56,8 +56,8 @@ def get_thumbnail_file(rel_path: str) -> bytes | None:
     key = hashlib.md5(rel_path.encode()).hexdigest()[:12]
     cache = _cache_path(key)
     if os.path.exists(cache):
-        # 若源 mtime 变化则重建
-        if os.path.getmtime(cache) >= os.path.getmtime(full):
+        # 若源 mtime 变化则重建（ns 粒度，与响应 ETag 同信号源）
+        if os.stat(cache).st_mtime_ns >= os.stat(full).st_mtime_ns:
             with open(cache, "rb") as f:
                 return f.read()
     try:
