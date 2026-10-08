@@ -50,6 +50,7 @@ tailwind.config = {
     --ico-dock:calc(var(--dock) * .39);        /* 24 */
     --ico-fab:calc(var(--fab) * .39);          /* 24 */
     --ctrl-sm:36px;                    /* 内容内次级 chip（面包屑/标签/历史）：iOS 32–36 */
+    --content-max:820px;               /* 页面内容列上限（≈ iPad 11″ 竖屏可用宽 820-2×16） */
     --card-r:18px;                     /* 内容卡片圆角 */
     --r-tile:14px;                     /* 图片格圆角 */
     --ok:#2E7D4F; --danger:#D6363C;    /* 语义色 */
@@ -74,8 +75,9 @@ tailwind.config = {
   }
   .ico{ display:block; }
 
-  /* ===== 固定 chrome 与内容同栏对齐（max-w-5xl + px-4，与 #app 内容一致） ===== */
-  .chrome-col{ max-width:64rem; margin:0 auto; padding:0 1rem; display:flex; align-items:center; justify-content:space-between; }
+  /* ===== 固定 chrome 与内容同栏对齐（同 --content-max + px-4） ===== */
+  .page{ max-width:var(--content-max); margin:0 auto; padding:0 1rem; }
+  .chrome-col{ max-width:var(--content-max); margin:0 auto; padding:0 1rem; display:flex; align-items:center; justify-content:space-between; }
   /* 顶部 affix：实色 → 透明 渐变（+同遮罩的减速模糊），避免滚动内容与文字直接相压。
      注意：渐变/模糊/遮罩必须放在 ::before 上——若放在 #chrome-top 本体，
      mask 会连同子元素（⋯ 气泡）一起被遮掉 → 气泡看起来“坏掉”。 */
@@ -180,7 +182,7 @@ tailwind.config = {
 
   /* ===== 搜索视图：底部（输入框与取消钮各自独立，无外层容器打底） ===== */
   #search-bar{
-    position:fixed; z-index:60; left:0; right:0; max-width:64rem; margin:0 auto; padding:0 1rem;
+    position:fixed; z-index:60; left:0; right:0; max-width:var(--content-max); margin:0 auto; padding:0 1rem;
     bottom: calc(12px + env(safe-area-inset-bottom));
     display:flex; gap:8px; align-items:center;
   }

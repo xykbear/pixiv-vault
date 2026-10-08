@@ -88,7 +88,7 @@ function browseShell() {
   // 层内过滤已移除：搜索统一走右下搜索钮的全库搜索（Enter 触发）。
   // 顶/底固定 chrome 由 index.html 提供；面包屑是内容第一行，随内容滚动。
   return `
-    <div class="max-w-5xl mx-auto px-4">
+    <div class="page">
       <div id="breadcrumb"></div>
       <div id="content"></div>
     </div>`;
@@ -151,7 +151,7 @@ function clearSearchInput() {
 function searchShell() {
   // 底部搜索条：胶囊输入框 + 独立取消钮（返回），与固定 chrome 同层
   return `
-    <div class="max-w-5xl mx-auto px-4">
+    <div class="page">
       <div id="search-body"></div>
     </div>
     <div id="search-bar">
@@ -322,9 +322,11 @@ function renderBreadcrumb() {
   // 显示成全路径会变成「点了没反应/串数据」的失效面包屑。
   if (state.returnTo) {
     const cur = crumbs.length ? crumbs[crumbs.length - 1] : '';
+    // 与浏览面包屑统一：每一项可点，点 = 回到该项上层。
+    // 搜索来源下当前项的「上层」= 搜索结果列表 → 点角色名即返回结果。
     el.innerHTML = `<div class="bc">
       <button class="bc-c root" onclick="goBack()">${ICONS.search}<span>搜索结果</span></button>
-      ${cur ? `<span class="bc-s">›</span><span class="bc-c now">${esc(cur)}</span>` : ''}
+      ${cur ? `<span class="bc-s">›</span><button class="bc-c now" onclick="goBack()">${esc(cur)}</button>` : ''}
     </div>`;
     return;
   }
@@ -467,17 +469,17 @@ async function randomChar(attempt = 0) {
   // 仅在浏览上下文轮询/跳转（切到下载/设置或进了搜索就放弃）
   if (state.view !== 'browse' || state.searchMode) return;
   let d;
-  try { d = await api('/api/random'); } catch (e) { return; }
+  try { d = await api('/api/random'); }
+  catch (e) { toast('随机角色失败：' + (e && e.message ? e.message : e)); return; }  // 不再静默
   if (d.state !== 'ready') {
-    if (attempt >= 40) return;
+    if (attempt >= 40) { toast('随机角色：索引构建超时'); return; }
     if (attempt === 0) toast('正在构建全库索引（首次约 20s）…');
     setTimeout(() => randomChar(attempt + 1), 1500);
     return;
   }
-  if (d.item) {
-    state.returnTo = null;
-    jumpToChar(d.item.author, d.item.series, d.item.character);
-  }
+  if (!d.item) { toast('随机角色：索引为空'); return; }
+  state.returnTo = null;
+  jumpToChar(d.item.author, d.item.series, d.item.character);
 }
 
 let _toastTimer = null;
@@ -1047,7 +1049,7 @@ function renderDownload() {
   if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
   state.tasks = {};
   app.innerHTML = `
-    <div class="max-w-5xl mx-auto px-4 py-4">
+    <div class="page py-4">
       <div class="flex gap-2 mb-4">
         <input id="dl-url" type="text" placeholder="粘贴 pixiv 链接 (artworks/{id})" class="field flex-1 min-w-0">
         <button id="dl-preview" onclick="doPreview()" class="btn-primary">预览</button>
@@ -1397,7 +1399,7 @@ async function renderSettings() {
   const d = await api('/api/config');
   const cfg = d.config;
   app.innerHTML = `
-    <div class="max-w-5xl mx-auto px-4 py-4">
+    <div class="page py-4">
       <div class="card p-4 mb-4">
         <div class="font-medium mb-3">网络代理</div>
         <div class="grid grid-cols-3 gap-2 mb-3">
