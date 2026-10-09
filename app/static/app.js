@@ -828,7 +828,7 @@ function openUgoiraPlayer(ugList, idx) {
   app.innerHTML = `
     <div id="viewer" class="fixed inset-0 bg-black z-[2025] overflow-hidden">
       <div id="v-stage" class="w-full h-full flex items-center justify-center touch-pan-y"></div>
-      <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020]" style="padding-top: calc(1rem + env(safe-area-inset-top))">
+      <div id="v-topbar" class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020]" style="padding-top: calc(1rem + env(safe-area-inset-top))">
         <button onclick="closeViewer()" class="p-1 -ml-1 opacity-80">${ICONS.back}</button>
         <div class="flex-1 truncate text-sm">${esc(ugList[idx].id)}</div>
         ${ugList.length > 1 ? `<div id="v-count" class="text-xs bg-black/40 rounded px-2 py-1">${idx + 1}/${ugList.length}</div>` : ''}
@@ -862,7 +862,7 @@ function loadUgoiraAt(idx) {
     .then(frames => {
       if (_ugCancel || gen !== _ugGen || !Array.isArray(frames) || frames.length === 0) throw new Error('无帧数据');
       _ugFrameData = frames;
-      stage.innerHTML = `<div class="text-white p-6 text-center"><canvas id="v-canvas"></canvas></div>`;
+      stage.innerHTML = `<div class="text-white text-center"><canvas id="v-canvas"></canvas></div>`;
       // 预加载全部帧到内存 Image：播放期间零网络请求（生命周期=播放器实例，切换/关闭即释放）。
       // 帧响应带 Cache-Control/ETag（见 app/main.py），跨次打开走浏览器缓存/304。
       return Promise.all(frames.map(f => new Promise((res, rej) => {
@@ -879,7 +879,11 @@ function loadUgoiraAt(idx) {
       const canvas = $('#v-canvas');
       if (!canvas) return;
       const W = imgs[0].naturalWidth, H = imgs[0].naturalHeight;
-      const maxW = window.innerWidth - 32, maxH = window.innerHeight * 0.6;
+      // 仅顶部返回栏需预留（含 iOS 安全区）；宽度用满，不缩
+      const bar = document.getElementById('v-topbar');
+      const reserve = bar ? bar.offsetHeight : 56;
+      stage.style.paddingTop = reserve + 'px';
+      const maxW = window.innerWidth, maxH = window.innerHeight - reserve;
       const r = Math.min(maxW / W, maxH / H, 1);
       canvas.width = W; canvas.height = H;
       canvas.style.width = (W * r) + 'px'; canvas.style.height = (H * r) + 'px';
