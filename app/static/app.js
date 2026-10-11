@@ -478,6 +478,14 @@ async function randomChar(attempt = 0) {
     return;
   }
   if (!d.item) { toast('随机角色：索引为空'); return; }
+  // 随机跳转直达图片层、跳过系列/角色层：后端随 item 一并返回这两层列表
+  // （与 item 同源）。直接填入缓存，面包屑上跳才能渲染正确层级；
+  // 否则 navCrumb 会拿上一次浏览的 entries/characters 渲染 → 串作者。
+  state.entries = d.entries || [];
+  state.characters = d.characters || [];
+  // 这两个层是全新上下文，清掉上一作者的滚动记忆，避免面包屑上跳恢复到旧偏移
+  state.scrollPosByLevel[1] = 0;
+  state.scrollPosByLevel[2] = 0;
   state.returnTo = null;
   jumpToChar(d.item.author, d.item.series, d.item.character);
 }

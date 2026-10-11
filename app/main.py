@@ -108,11 +108,25 @@ def api_search(q: str, limit: int = 200):
 
 @app.get("/api/random")
 def api_random():
-    """随机角色（⋯ 菜单）：索引未就绪时返回 state，前端轮询后跳转。"""
+    """随机角色（⋯ 菜单）：返回 item 及其上级导航上下文（系列/角色列表）。
+
+    随机跳转直达图片层、跳过系列/角色层，前端面包屑上跳依赖这两层缓存；
+    随 item 一并返回，既省掉前端两次往返，也保证上下文与 item 的
+    author/series 对应一致。
+    索引未就绪时返回 state，前端轮询后跳转（此时上下文为空）。
+    """
     state = scanner.ensure_index()
     if state != "ready":
-        return {"state": state, "item": None}
-    return {"state": "ready", "item": scanner.random_entry()}
+        return {"state": state, "item": None, "entries": [], "characters": []}
+    item = scanner.random_entry()
+    if not item:
+        return {"state": "ready", "item": None, "entries": [], "characters": []}
+    return {
+        "state": "ready",
+        "item": item,
+        "entries": scanner.list_series(item["author"]),
+        "characters": scanner.list_characters(item["author"], item["series"]),
+    }
 
 
 @app.get("/api/thumb/file")
