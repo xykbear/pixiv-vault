@@ -1359,8 +1359,8 @@ function updateTaskUI(id, t) {
         entry.retryBtn = btn;
       }
     }
-    // 下载完成（done）自动清除；错误/取消保留供查看/重试
-    if (t.status === 'done') {
+    // 下载完成（done）/ 已取消（cancelled）自动清除；错误保留供查看/重试
+    if (t.status === 'done' || t.status === 'cancelled') {
       setTimeout(() => clearTask(id), 2500);
     }
   }
@@ -1401,7 +1401,17 @@ function retryTask(meta) {
 }
 
 async function cancelTask(taskId) {
-  await api('/api/download/' + taskId, { method: 'DELETE' });
+  let ok = false;
+  try {
+    const r = await api('/api/download/' + taskId, { method: 'DELETE' });
+    ok = !!(r && r.cancelled);
+  } catch (e) {
+    // 服务端已无该任务（已被其他会话清除）：本地照样清理
+    if (String(e.message).includes('404')) ok = true;
+    else { alert('取消失败: ' + e.message); return; }
+  }
+  // 取消即丢弃：卡片立即移除（服务端任务由 worker 退出时摘除 / 顶部列表已过滤）
+  if (ok) { clearTask(taskId); return; }
   pollAllTasks();
 }
 

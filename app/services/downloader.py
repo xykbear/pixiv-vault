@@ -25,6 +25,9 @@ _WEBAPP_LOG_FILE = os.environ.get("PIXIV_WEBAPP_LOG_FILE", "")
 
 _SAFE = re.compile(r'[/\\:*?"<>|]')
 SERIES_DIRS = ("_未分類", "_未分类", "_meta_skip")
+# 任务终态：不可再取消、不再推进。done/error 由前端/API 清理；
+# cancelled 是「丢弃」语义——立即退出任务列表（见 list_tasks）。
+TERMINAL_STATUSES = ("done", "error", "cancelled")
 
 
 def _safe(s: str) -> str:
@@ -296,10 +299,21 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
         _TASKS[task_id] = task
 
     def run():
-        task["status"] = "queued"
+        # 取消可能发生在 pending（线程尚未启动）：此时不得把 cancelled 覆盖成
+        # queued/running，否则任务照常下载、卡片永久留在列表。
+        with _LOCK:
+            if task["status"] == "cancelled":
+                _TASKS.pop(task_id, None)
+                return
+            task["status"] = "queued"
         task["log"].append("排队中…")
         with _SEM:
-            task["status"] = "running"
+            with _LOCK:
+                # 排队期间（等并发槽）被取消：直接退出，不进入 running
+                if task["status"] == "cancelled":
+                    _TASKS.pop(task_id, None)
+                    return
+                task["status"] = "running"
             client = config.make_httpx_client(timeout=config.DL_TIMEOUT)
             try:
                 body = pixiv_client.get_work_meta(work_id, client)
@@ -353,6 +367,11 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                     task["log"].append(f"错误: {e}")
             finally:
                 client.close()
+                # 取消是「丢弃」语义：worker 退出即从注册表摘除（列表不再残留，
+                # 其他会话轮询到 404 自动移除卡片）
+                if task["status"] == "cancelled":
+                    with _LOCK:
+                        _TASKS.pop(task_id, None)
 
     threading.Thread(target=run, daemon=True).start()
     return task
@@ -364,16 +383,26 @@ def get_task(task_id: str) -> dict | None:
 
 
 def list_tasks() -> list[dict]:
-    """返回全部任务（含快捷指令 API 触发的），用于下载视图展示。"""
+    """返回全部任务（含快捷指令 API 触发的），用于下载视图展示。
+
+    已取消任务不返回：取消即丢弃，若继续列出会永久占据下载列表
+    （BUG：已取消任务一直占据 webapp 下载列表）。
+    """
     with _LOCK:
-        return list(_TASKS.values())
+        return [t for t in _TASKS.values() if t["status"] != "cancelled"]
 
 
 def cancel_task(task_id: str) -> bool:
+    """取消任务（pending/queued/running → cancelled）；已终结返回 False。
+
+    queued（等并发槽）必须可取消——只判断 pending/running 时排队中的任务
+    取消无效，会继续下载并留在列表（同 BUG）。
+    """
     with _LOCK:
         t = _TASKS.get(task_id)
-        if t and t["status"] in ("pending", "running"):
+        if t and t["status"] not in TERMINAL_STATUSES:
             t["status"] = "cancelled"
+            t["log"].append("已取消")
             return True
     return False
 
@@ -382,7 +411,7 @@ def remove_task(task_id: str) -> bool:
     """移除任务（仅终结状态：done/error/cancelled）。运行中的请先取消。"""
     with _LOCK:
         t = _TASKS.get(task_id)
-        if t and t["status"] in ("done", "error", "cancelled"):
+        if t and t["status"] in TERMINAL_STATUSES:
             del _TASKS[task_id]
             return True
     return False
