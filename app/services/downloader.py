@@ -39,6 +39,52 @@ def _root() -> str:
     return config.get_root()
 
 
+def _meta_payload(work_id: str, body: dict, pages: list | None = None) -> dict:
+    """meta 落盘内容（字段格式与 pixiv_lib.save_work_meta / crawl.py 一致）。
+
+    ⚠️ 不能直接 dump /ajax/illust 的原始 body：其 tags 字段是
+    ``{authorId, isLocked, tags, writable}`` 包裹结构，落盘后自动判定链
+    （match_tags / suggest_decision）会把 tags 读空，作品无法自动判定
+    （实战 2026-11-09：10 个 webapp 落盘作品 match_tags 全部返回空）。
+
+    pages: 多图 /ajax/illust/{id}/pages 的 body；写入后 download.py 补图
+    可直接复用，不必重抓（与本地 collect 落盘 meta 一致）。
+    """
+    raw = body.get("tags") or []
+    tag_list = raw if isinstance(raw, list) else (raw.get("tags") or [])
+    payload = {
+        "id": str(work_id),
+        "title": body.get("title"),
+        "titleCaptionTranslation": body.get("titleCaptionTranslation"),
+        "description": body.get("description"),
+        "illustType": body.get("illustType"),
+        "createDate": body.get("createDate"),
+        "uploadDate": body.get("uploadDate"),
+        "xRestrict": body.get("xRestrict"),
+        "sl": body.get("sl"),
+        "tags": [t.get("tag") if isinstance(t, dict) else t for t in tag_list],
+        "tagsWithTranslation": [
+            {"tag": t.get("tag"), "translation": t.get("translation")}
+            for t in tag_list if isinstance(t, dict)
+        ],
+        "pageCount": body.get("pageCount"),
+        "width": body.get("width"),
+        "height": body.get("height"),
+        "bookmarkCount": body.get("bookmarkCount"),
+        "likeCount": body.get("likeCount"),
+        "commentCount": body.get("commentCount"),
+        "viewCount": body.get("viewCount"),
+        "aiType": body.get("aiType"),
+        "isOriginal": body.get("isOriginal"),
+        "userName": body.get("userName"),
+        "userId": body.get("userId"),
+        "urls": body.get("urls"),
+    }
+    if pages:
+        payload["pages"] = pages
+    return payload
+
+
 def _log_file() -> str:
     """登记 log 单文件：归档根下 .webapp_downloads.log（与治理端约定，. 前缀不被扫盘）。"""
     return _WEBAPP_LOG_FILE or os.path.join(config.get_root(), ".webapp_downloads.log")
@@ -210,7 +256,8 @@ def preview(work_id: str) -> dict:
         client.close()
 
 
-def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str) -> None:
+def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str,
+                     pages: list | None = None) -> None:
     os.makedirs(dest_dir, exist_ok=True)
     total = len(urls)
     task["progress"] = 0
@@ -221,7 +268,7 @@ def _download_static(task: dict, client, body: dict, urls: list, dest_dir: str) 
     meta_path = os.path.join(dest_dir, f"{work_id}.meta.json")
     if not os.path.exists(meta_path):
         with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(body, f, ensure_ascii=False, indent=1)
+            json.dump(_meta_payload(work_id, body, pages), f, ensure_ascii=False, indent=2)
         task["_new_meta"] = meta_path  # 本次新写 meta（入库），run 尾冒泡用
     for idx, url in enumerate(urls):
         if task["status"] == "cancelled":
@@ -268,7 +315,7 @@ def _download_ugoira(task: dict, client, body, dest_dir: str, base: str) -> None
         meta_path = os.path.join(dest_dir, f"{base}.meta.json")
         if not os.path.exists(meta_path):
             with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(body, f, ensure_ascii=False, indent=1)
+                json.dump(_meta_payload(work_id, body), f, ensure_ascii=False, indent=2)
             task["_new_meta"] = meta_path  # 本次新写 meta（入库），run 尾冒泡用
         task["log"].append(f"动图 {work_id} 完成：{len(frames)} 帧")
 
@@ -342,10 +389,10 @@ def create_task(url: str, series: str | None, characters: list | None, is_collec
                     _download_ugoira(task, client, body, dest_dir, work_id)
                     task["target"] = rel
                 else:
-                    urls = pixiv_client.work_original_urls(
-                        body, pixiv_client.get_pages(work_id, client))
+                    pages = pixiv_client.get_pages(work_id, client)
+                    urls = pixiv_client.work_original_urls(body, pages)
                     dest_dir = os.path.join(_root(), rel)
-                    _download_static(task, client, body, urls, dest_dir)
+                    _download_static(task, client, body, urls, dest_dir, pages)
                     task["target"] = rel
                 # 取消期间线程可能仍在跑，终结状态以取消为准（不覆盖 cancelled）
                 if task["status"] != "cancelled":
