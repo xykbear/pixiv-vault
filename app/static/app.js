@@ -29,6 +29,8 @@ const state = {
   dlMode: 'tag',        // 'collection' | 'tag'
   previewMeta: null,
   selectedTags: [],     // 按点击顺序的已选标签
+  // 各层数据缓存归属（谁的数据）：返回路径据此判断能否直接复用缓存，不靠当前面包屑猜
+  cacheKey: { 1: null, 2: null, 3: null },
   tasks: {},            // task_id -> { el: {status, bar, log}, done }
   _pollTimer: null,
 };
@@ -48,8 +50,107 @@ const ICONS = {
   shuffle: '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.35" fill="currentColor" stroke="none"/><circle cx="15" cy="15" r="1.35" fill="currentColor" stroke="none"/></svg>',
 };
 
-function showView(name) {
-  if (state.view !== name) cleanupViewerOnTabSwitch();
+// ================= 浏览器历史（返回键/返回手势） =================
+// 每进入一屏 push 一次；popstate 用内存闭包重建目标屏（不重复 push）。
+// 屏幕内容不进 history.state：返回靠闭包重建，页面重载即从头开始。
+let _navReplay = false;          // popstate 重建期间禁止再 push
+const _navEntries = new Map();   // pos -> { rebuild, level, title }
+
+function setDocTitle(t) {
+  document.title = t ? `${t} · Pixiv Vault` : 'Pixiv Vault';
+}
+
+// 历史位置（0 起），不是自增 id：返回后再深入时浏览器会截断前进栈、位置被复用，
+// 自增 id 与真实位置就会错位（面包屑多步上跳会跳错）。
+function navPos() {
+  const s = history.state;
+  return s && typeof s.pos === 'number' ? s.pos : 0;
+}
+
+// 记录一次可回退的导航。rebuild 在按返回键时重建该屏；
+// level 标记浏览层级（0=作者 1=系列 2=角色 3=图片），面包屑上跳靠它找目标条目。
+function pushNav(rebuild, title, level) {
+  if (_navReplay) return;
+  const pos = navPos() + 1;
+  _navEntries.set(pos, { rebuild, level, title });
+  try { history.pushState({ pos }, ''); } catch (e) { return; }
+  if (title) setDocTitle(title);
+}
+
+// 覆盖当前条目（冷启动的根屏，不留一条"空"历史）
+function replaceNav(rebuild, title, level) {
+  const pos = navPos();
+  _navEntries.set(pos, { rebuild, level, title });
+  try { history.replaceState({ pos }, ''); } catch (e) {}
+  if (title) setDocTitle(title);
+}
+
+// 退一格：仅当上一条是本应用记录的（否则交回浏览器/走调用方兜底）
+function navBack() {
+  const pos = navPos();
+  if (pos > 0 && _navEntries.has(pos - 1)) { history.back(); return true; }
+  return false;
+}
+
+// 找最近的指定层级条目（面包屑上跳用）；先遇到更浅的层说明栈里没有目标层
+function navPosOfLevel(level) {
+  for (let p = navPos() - 1; p >= 0; p--) {
+    const ent = _navEntries.get(p);
+    if (!ent) return null;
+    if (ent.level === level) return p;
+    if (ent.level !== undefined && ent.level < level) return null;
+  }
+  return null;
+}
+
+// 层签：同一层的数据归属（作者 / 作者+系列 / 作者+系列+角色）
+function _crumbKey(level, crumb) {
+  if (level === 1) return crumb[0];
+  if (level === 2) return `${crumb[0]}\u0000${crumb[1]}`;
+  return [crumb[0], crumb[1], crumb[2] || ''].join('\u0000');
+}
+
+// 返回路径能否直接用内存缓存重建：该层数据仍在，且正是目标层的数据
+function _cacheValid(level, crumb) {
+  if (level === 0) return true;            // 作者列表始终在 state.authors
+  return state.cacheKey[level] === _crumbKey(level, crumb);
+}
+
+// 用缓存同步重建某层（返回/关查看器路径）：不请求网络，也就没有异步窗口
+function _renderCached(level, crumb, restoreY) {
+  _teardownViewer();
+  state.view = 'browse';
+  state.breadcrumb = crumb.slice();
+  state.curLevel = level;
+  resetSearch();
+  renderLevelView();
+  _restoreScroll(restoreY);
+}
+
+// 刷新/新文档后内存栈已清空：这条历史条目没有对应屏幕 → 回根屏（再按才退出应用）
+function _navUnknownEntry() {
+  if (state.view === 'browse' && state.curLevel === 0 && !state.searchMode) return;
+  _showView('browse');
+}
+
+window.addEventListener('popstate', (e) => {
+  if (!e.state || typeof e.state.pos !== 'number') return;  // 不是本应用条目
+  const ent = _navEntries.get(e.state.pos);
+  if (!ent) { _navUnknownEntry(); return; }
+  if (ent.title) setDocTitle(ent.title);   // 返回后标题跟屏走
+  _navReplay = true;
+  try {
+    // 正常路径是同步的（缓存重建）；缓存不匹配才回退网络，失败也不能静默
+    const ret = ent.rebuild();
+    if (ret && typeof ret.catch === 'function') ret.catch(err => toast('返回失败：' + ((err && err.message) || err)));
+  } finally { _navReplay = false; }
+});
+
+const VIEW_TITLES = { browse: '浏览', download: '下载', settings: '设置' };
+
+// 切 tab（不记历史；记录由 showView 负责）
+function _showView(name) {
+  cleanupViewerOnTabSwitch();   // 换屏先拆掉覆盖层，避免 Viewer.js 容器残留在 body 上
   state.view = name;
   state.searchMode = false;
   state.searchQuery = '';
@@ -61,15 +162,18 @@ function showView(name) {
   if (name === 'settings') renderSettings();
 }
 
-// 切换 tab 时清理查看器资源（动图定时器/Viewer.js），避免后台持续请求
+function showView(name) {
+  // 重复点当前 tab 只是回到顶层，不产生一条"看起来没反应"的历史
+  // curLevel 只在"回浏览根"时才算变化：深层浏览后重复点当前 tab 不该再压一条历史
+  const changed = name !== state.view || state.searchMode || (name === 'browse' && state.curLevel !== 0);
+  _showView(name);
+  // 浏览 tab 视为 0 层（面包屑可跳），另两个 tab 不是浏览层级
+  if (changed) pushNav(() => _showView(name), VIEW_TITLES[name], name === 'browse' ? 0 : undefined);
+}
+
+// 切换 tab / 重建界面时清理查看器资源（动图定时器/Viewer.js），避免后台持续请求
 function cleanupViewerOnTabSwitch() {
-  _ugCancel = true;
-  if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
-  if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
-  _ugAbortPending();
-  _ugImgs = []; _ugFrameData = [];  // 释放预加载帧内存
-  if (_viewer) { try { _viewer.destroy(); } catch (e) {} _viewer = null; }
-  state.viewer = null;
+  _teardownViewer();
 }
 
 async function api(path, opts) {
@@ -77,10 +181,32 @@ async function api(path, opts) {
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch (e) {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;   // 调用方用它区分「服务端已无该资源」与真实失败（detail 是文案，不含状态码）
+    throw err;
   }
   return res.json();
 }
+
+// ================= 模板事件委托 =================
+// 模板里的可点元素用 data-act 声明动作，数据放 data-*：不拼进 onclick 字符串。
+// （esc() 产出的是 HTML 实体，写进 onclick 属性会被解析器先还原成引号，截断 JS 语法）
+const ACTIONS = {
+  loadSeries:     el => loadSeries(el.dataset.author),
+  loadCharacters: el => loadCharacters(el.dataset.author, el.dataset.series),
+  loadImages:     el => loadImages(el.dataset.author, el.dataset.series, el.dataset.character || undefined),
+  openUgoira:     el => openUgoiraDirect(el.dataset.author, el.dataset.name),
+  openViewer:     el => openViewerAtByFile(el.dataset.file),
+  jumpToChar:     el => jumpToChar(el.dataset.author, el.dataset.series, el.dataset.character),
+  startDownload:  el => startDownload(el.dataset.id),
+};
+
+document.addEventListener('click', (e) => {
+  const el = e.target && e.target.closest && e.target.closest('[data-act]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.act];
+  if (fn) fn(el);
+});
 
 // ================= 浏览视图 =================
 
@@ -173,8 +299,12 @@ function mountSearch(rt) {
   if (inp) {
     inp.value = state.searchQuery;
     inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); runSearch(inp.value.trim(), true); }
-      else if (e.key === 'Escape') { closeSearch(); }
+      if (e.key !== 'Enter') { if (e.key === 'Escape') closeSearch(); return; }
+      // 输入法选词确认也用回车：此时不能拦截默认行为，也不能提交
+      // （Safari 会先复位 isComposing，故补 keyCode 229 / WebKit bug 165004）
+      if (e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      runSearch(inp.value.trim(), true);
     });
     // 仅切换「清除」按钮可见性，不触发请求（搜索只由 Enter 触发）
     inp.addEventListener('input', () => {
@@ -203,17 +333,26 @@ function openSearch() {
   state.returnTo = null;
   cleanupViewerOnTabSwitch();
   mountSearch(null);
+  // 搜索是一屏：从图片层返回时用内存里的 returnTo 原地恢复结果与滚动位置
+  pushNav(() => {
+    const rt = state.returnTo;
+    state.returnTo = null;
+    mountSearch(rt);
+    if (rt && typeof rt.scrollY === 'number') requestAnimationFrame(() => window.scrollTo(0, rt.scrollY || 0));
+  }, '搜索');
 }
 
 function closeSearch() {
   if (_searchPoll) { clearTimeout(_searchPoll); _searchPoll = null; }
+  // 优先退一格回来源屏（内容由 popstate 重建）
+  if (navBack()) return;
   state.searchMode = false;
   state.searchQuery = '';
   state.searchResults = null;
   const back = state._viewBeforeSearch || 'browse';
   state._viewBeforeSearch = null;
   if (back !== 'browse') {
-    showView(back);
+    _showView(back);
   } else {
     renderLevelView();
     _restoreScroll(state.scrollPosByLevel[state.curLevel] || 0);  // 恢复离开层的滚动位置
@@ -280,7 +419,7 @@ function renderSearchResults(q, results) {
     ? `<div class="text-xs text-gray-400 my-3">“${esc(q)}” 全库命中 <b style="color:var(--accent)">${results.length}</b> 个角色 / 系列</div>`
     : `<div class="text-xs text-gray-400 my-3">“${esc(q)}” 无跨作者命中</div>`;
   const rows = results.map(r => `
-    <button onclick="jumpToChar('${esc(r.author)}','${esc(r.series)}','${esc(r.character)}')" class="row-item">
+    <button data-act="jumpToChar" data-author="${esc(r.author)}" data-series="${esc(r.series)}" data-character="${esc(r.character)}" class="row-item">
       <div class="row-th">${ICONS.image}</div>
       <div class="row-tx"><b>${esc(r.character)}</b><i>${esc(r.author)} › ${esc(r.series)}</i></div>
       <span class="row-chev">${ICONS.chevron}</span>
@@ -340,6 +479,11 @@ function renderBreadcrumb() {
 
 function navCrumb(i) {
   _saveScrollNow();          // 记录离开层位置（此刻 DOM 仍为旧层）
+  // 层级上跳 = 历史后退到目标层条目（与返回键共用同一套重建）
+  if (i < state.curLevel) {
+    const target = navPosOfLevel(i);
+    if (target !== null) { history.go(target - navPos()); return; }
+  }
   state.returnTo = null;     // 面包屑返回 = 离开搜索来源
   state.breadcrumb = state.breadcrumb.slice(0, i);
   state.curLevel = i;
@@ -410,6 +554,8 @@ function goBack() {
   closeMenu();
   if (state.view !== 'browse') return;
   if (state.searchMode) { closeSearch(); return; }
+  // 优先走浏览器历史（返回按钮 / 返回手势 / 返回键同一条路径）
+  if (navBack()) return;
   if (state.returnTo) {
     const rt = state.returnTo;
     state.returnTo = null;
@@ -483,6 +629,8 @@ async function randomChar(attempt = 0) {
   // 否则 navCrumb 会拿上一次浏览的 entries/characters 渲染 → 串作者。
   state.entries = d.entries || [];
   state.characters = d.characters || [];
+  state.cacheKey[1] = d.item.author;
+  state.cacheKey[2] = _crumbKey(2, [d.item.author, d.item.series]);
   // 这两个层是全新上下文，清掉上一作者的滚动记忆，避免面包屑上跳恢复到旧偏移
   state.scrollPosByLevel[1] = 0;
   state.scrollPosByLevel[2] = 0;
@@ -521,16 +669,19 @@ async function refreshLevel() {
   } else if (i === 1) {
     const d = await api(`/api/tree/entries?author=${enc(state.breadcrumb[0])}`);
     state.entries = d.entries;
+    state.cacheKey[1] = state.breadcrumb[0];
     renderSeries();
   } else if (i === 2) {
     const d = await api(`/api/tree/characters?author=${enc(state.breadcrumb[0])}&series=${enc(state.breadcrumb[1])}`);
     state.characters = d.characters;
+    state.cacheKey[2] = _crumbKey(2, state.breadcrumb);
     renderCharacters();
   } else if (i === 3) {
     const b = state.breadcrumb;
     const qs = b[2] ? `author=${enc(b[0])}&series=${enc(b[1])}&character=${enc(b[2])}` : `author=${enc(b[0])}&series=${enc(b[1])}`;
     const d = await api(`/api/tree/images?${qs}`);
     state.images = d.images;
+    state.cacheKey[3] = _crumbKey(3, b);
     renderImages();
   }
   _restoreScroll(keep);
@@ -544,7 +695,7 @@ function renderAuthors() {
   const content = $('#content');
   if (!list.length) { content.innerHTML = empty('无匹配作者'); return; }
   content.innerHTML = list.map(a => `
-    <button onclick="loadSeries('${esc(a.author)}')" class="row-item">
+    <button data-act="loadSeries" data-author="${esc(a.author)}" class="row-item">
       <div class="row-th">${ICONS.folder}</div>
       <div class="row-tx"><b>${esc(a.author)}</b><i>作者 · ${fmtDate(a.mtime)}</i></div>
       <span class="row-chev">${ICONS.chevron}</span>
@@ -552,18 +703,34 @@ function renderAuthors() {
 }
 
 async function loadSeries(author) {
+  _saveScrollNow();   // 记录离开层位置（此刻 DOM 仍为旧层）
+  await _applySeries(author, 0);
+  pushNav(() => _replaySeries(author), author, 1);
+}
+
+// 返回路径：内存里还有该层数据就同步重建（不请求网络、无异步窗口）
+function _replaySeries(author) {
+  if (_cacheValid(1, [author])) return _renderCached(1, [author], state.scrollPosByLevel[1] || 0);
+  return _applySeries(author);
+}
+
+// 只重绘（不记历史）：前进导航与 popstate 重建共用
+async function _applySeries(author, restoreY) {
+  _teardownViewer();   // 重建界面即离开查看器（返回键路径）
   const d = await api(`/api/tree/entries?author=${enc(author)}`);
-  _saveScrollNow();
   state.entries = d.entries;
+  state.cacheKey[1] = author;
   state.returnTo = null;
   state.breadcrumb = [author];
   state.curLevel = 1;
-  state.scrollPosByLevel[1] = 0;
+  state.view = 'browse';   // popstate 重建时可能从别的 tab 回来
+  const y = restoreY === undefined ? (state.scrollPosByLevel[1] || 0) : restoreY;
+  state.scrollPosByLevel[1] = y;
   resetSearch();
   app.innerHTML = browseShell();
   renderBreadcrumb();
   renderSeries();
-  _restoreScroll(0);
+  _restoreScroll(y);
 }
 
 function renderSeries() {
@@ -574,7 +741,7 @@ function renderSeries() {
   if (!list.length) { content.innerHTML = empty('无系列'); return; }
   content.innerHTML = list.map(e => {
     if (e.kind === 'ugoira') {
-      return `<button onclick="openUgoiraDirect('${esc(e.author)}','${esc(e.name)}')" class="row-item">
+      return `<button data-act="openUgoira" data-author="${esc(e.author)}" data-name="${esc(e.name)}" class="row-item">
         <div class="row-th">${ICONS.film}</div>
         <div class="row-tx"><b>${esc(e.name)}</b><i>动图 · ${fmtDate(e.mtime)}</i></div>
         <span class="row-chev">${ICONS.chevron}</span>
@@ -582,8 +749,8 @@ function renderSeries() {
     }
     const isFlat = e.kind === '_未分類' || e.kind === '_未分类';
     const label = isFlat ? '未分类' : '系列';
-    const onclick = isFlat ? `loadImages('${esc(e.author)}','${esc(e.name)}')` : `loadCharacters('${esc(e.author)}','${esc(e.name)}')`;
-    return `<button onclick="${onclick}" class="row-item">
+    const act = isFlat ? 'loadImages' : 'loadCharacters';
+    return `<button data-act="${act}" data-author="${esc(e.author)}" data-series="${esc(e.name)}" class="row-item">
       <div class="row-th">${ICONS.folder}</div>
       <div class="row-tx"><b>${esc(e.name)}</b><i>${label} · ${fmtDate(e.mtime)}</i></div>
       <span class="row-chev">${ICONS.chevron}</span>
@@ -592,18 +759,34 @@ function renderSeries() {
 }
 
 async function loadCharacters(author, series) {
+  _saveScrollNow();   // 记录离开层位置（此刻 DOM 仍为旧层）
+  await _applyCharacters(author, series, 0);
+  pushNav(() => _replayCharacters(author, series), series, 2);
+}
+
+function _replayCharacters(author, series) {
+  const crumb = [author, series];
+  if (_cacheValid(2, crumb)) return _renderCached(2, crumb, state.scrollPosByLevel[2] || 0);
+  return _applyCharacters(author, series);
+}
+
+// 只重绘（不记历史）：前进导航与 popstate 重建共用
+async function _applyCharacters(author, series, restoreY) {
+  _teardownViewer();   // 重建界面即离开查看器（返回键路径）
   const d = await api(`/api/tree/characters?author=${enc(author)}&series=${enc(series)}`);
-  _saveScrollNow();
   state.characters = d.characters;
+  state.cacheKey[2] = _crumbKey(2, [author, series]);
   state.returnTo = null;
   state.breadcrumb = [author, series];
   state.curLevel = 2;
-  state.scrollPosByLevel[2] = 0;
+  state.view = 'browse';   // popstate 重建时可能从别的 tab 回来
+  const y = restoreY === undefined ? (state.scrollPosByLevel[2] || 0) : restoreY;
+  state.scrollPosByLevel[2] = y;
   resetSearch();
   app.innerHTML = browseShell();
   renderBreadcrumb();
   renderCharacters();
-  _restoreScroll(0);
+  _restoreScroll(y);
 }
 
 function renderCharacters() {
@@ -614,8 +797,8 @@ function renderCharacters() {
   if (!list.length) { content.innerHTML = empty('无角色'); return; }
   content.innerHTML = list.map(c => {
     const icon = `<div class="row-th">${c.kind === 'ugoira' ? ICONS.film : ICONS.image}</div>`;
-    const cb = c.kind === 'ugoira' ? `openUgoiraDirect('${esc(c.author)}','${esc(c.name)}')` : `loadImages('${esc(c.author)}','${esc(c.series)}','${esc(c.name)}')`;
-    return `<button onclick="${cb}" class="row-item">
+    const act = c.kind === 'ugoira' ? 'openUgoira' : 'loadImages';
+    return `<button data-act="${act}" data-author="${esc(c.author)}" data-series="${esc(c.series)}" data-name="${esc(c.name)}" data-character="${esc(c.name)}" class="row-item">
       ${icon}
       <div class="row-tx"><b>${esc(c.name)}</b><i>${c.kind === 'ugoira' ? '动图' : '角色'} · ${fmtDate(c.mtime)}</i></div>
       <span class="row-chev">${ICONS.chevron}</span>
@@ -625,18 +808,39 @@ function renderCharacters() {
 
 // 角色层：直接展示同角色所有图片（平铺网格）；character 为空适配 _未分类 平铺
 async function loadImages(author, series, character) {
+  // 从搜索结果进入时 returnTo 已就位，重建该屏时一并恢复（返回可回结果列表）
+  const rt = state.returnTo;
+  _saveScrollNow();   // 记录离开层位置（搜索层由 returnTo.scrollY 记）
+  await _applyImages(author, series, character, 0);
+  pushNav(() => _replayImages(author, series, character, rt), character || series || author, 3);
+}
+
+function _replayImages(author, series, character, rt) {
+  state.returnTo = rt;   // 从搜索结果进入时返回要恢复结果列表
+  const crumb = character ? [author, series, character] : [author, series];
+  if (_cacheValid(3, crumb)) {
+    return _renderCached(3, crumb, state.scrollPosByLevel[3] || 0);
+  }
+  return _applyImages(author, series, character);
+}
+
+// 只重绘（不记历史）：前进导航与 popstate 重建共用
+async function _applyImages(author, series, character, restoreY) {
+  _teardownViewer();   // 重建界面即离开查看器（返回键路径）
   const qs = character ? `author=${enc(author)}&series=${enc(series)}&character=${enc(character)}` : `author=${enc(author)}&series=${enc(series)}`;
   const d = await api(`/api/tree/images?${qs}`);
-  _saveScrollNow();
   state.images = d.images;
+  state.cacheKey[3] = _crumbKey(3, [author, series, character]);
   state.breadcrumb = character ? [author, series, character] : [author, series];
   state.curLevel = 3;
-  state.scrollPosByLevel[3] = 0;
+  state.view = 'browse';   // popstate 重建时可能从别的 tab 回来
+  const y = restoreY === undefined ? (state.scrollPosByLevel[3] || 0) : restoreY;
+  state.scrollPosByLevel[3] = y;
   resetSearch();
   app.innerHTML = browseShell();
   renderBreadcrumb();
   renderImages();
-  _restoreScroll(0);
+  _restoreScroll(y);
 }
 
 function renderImages() {
@@ -649,7 +853,7 @@ function renderImages() {
     const ugBadge = im.type === 'ugoira'
       ? `<div class="absolute top-1 right-1 w-5 h-5 rounded bg-black/60 text-white flex items-center justify-center">${ICONS.film}</div>`
       : '';
-    return `<button onclick="openViewerAtByFile('${esc(im.file)}')" class="block w-full group relative">
+    return `<button data-act="openViewer" data-file="${esc(im.file)}" class="block w-full group relative">
       <div class="tilecard">
         <div class="grid-img bg-pixiv-light overflow-hidden flex items-center justify-center">
           <img src="${thumb}" loading="lazy" class="w-full h-full object-cover group-active:scale-95 transition"
@@ -674,6 +878,7 @@ function relPath(im, file) {
 // ================= 查看器 =================
 
 let _viewer = null;          // Viewer.js 实例（仅静态图）
+let _viewerTeardown = false; // 拆解中：屏蔽 Viewer.js destroy() 内部的 hidden 回调
 
 // 从任意层级打开：图片列表（当前角色下的全部图片）
 function openViewerAt(idx) {
@@ -699,6 +904,21 @@ function openViewerAt(idx) {
     animTimer: null,
   };
   renderViewer();
+  pushNav(() => _rebuildLevel(), undefined, state.curLevel);  // 返回键/手势关查看器，而不是退出应用
+}
+
+// 全尺寸图地址（懒加载：只在真正看这张图时才请求）
+function imgUrl(it) {
+  return `/api/img?author=${enc(it.author)}&series=${enc(it.series)}&character=${enc(it.character)}&file=${enc(it.file)}`;
+}
+
+// 预取相邻全尺寸图，Viewer.js 切换时命中缓存（不把整组塞进 DOM）
+function _preloadViewerAround(list, idx) {
+  for (const i of [idx - 1, idx, idx + 1]) {
+    const it = list[i];
+    if (!it) continue;
+    new Image().src = imgUrl(it);
+  }
 }
 
 function openUgoiraDirect(author, base) {
@@ -721,7 +941,7 @@ function renderViewer() {
     <div id="viewer" class="fixed inset-0 z-[2025] overflow-hidden pointer-events-none">
       <ul class="viewer-list" style="display:none">
         ${v.pages.list.map((it, i) => `
-          <li><img src="/api/img?author=${enc(it.author)}&series=${enc(it.series)}&character=${enc(it.character)}&file=${enc(it.file)}" data-idx="${i}"></li>
+          <li><img data-src="${imgUrl(it)}" data-idx="${i}" alt=""></li>
         `).join('')}
       </ul>
       <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-black/70 to-transparent p-4 text-white flex items-center gap-3 z-[2020] pointer-events-auto" style="padding-top: calc(1rem + env(safe-area-inset-top))">
@@ -731,14 +951,20 @@ function renderViewer() {
       </div>
     </div>`;
   const list = app.querySelector('.viewer-list');
-  const imgs = list.querySelectorAll('img');
-  imgs.forEach(img => {
-    img.addEventListener('error', () => {
-      img.src = '/api/thumb/file?rel=' + enc(relPath(v.pages.list[+img.dataset.idx], v.pages.list[+img.dataset.idx].file));
-    });
-  });
+  let vIdx = v.pages.start;
+  _preloadViewerAround(v.pages.list, v.pages.start);
+  // /api/img 失败回落到缩略图（原行为）。img 的 error 不冒泡，用捕获阶段接；
+  // 列表里的图是懒加载的数据源，只有画布上的 <img> 会真的发起请求
+  $('#viewer').addEventListener('error', (ev) => {
+    const img = ev.target;
+    if (!img || img.tagName !== 'IMG' || img.closest('.viewer-list')) return;
+    const it = v.pages.list[vIdx];
+    if (!it) return;
+    img.src = `/api/thumb/file?rel=${enc(relPath(it, it.file))}`;
+  }, true);
   _viewer = new Viewer(list, {
     initialView: v.pages.start,
+    url: (image) => image.dataset.src,  // 懒加载：取消整组全尺寸图的初始请求
     inline: false,
     title: false,
     backdrop: "static",   // 保留遮罩但禁用点击空白关闭，统一用返回按钮
@@ -762,7 +988,9 @@ function renderViewer() {
     keyboard: false,
     viewed(e) {
       const idx = e.detail.index;
+      vIdx = idx;
       $('#v-count').textContent = `${idx + 1}/${v.pages.list.length}`;
+      _preloadViewerAround(v.pages.list, idx);
     },
     hidden() {
       if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
@@ -846,6 +1074,7 @@ function openUgoiraPlayer(ugList, idx) {
   stage.innerHTML = `<div class="text-white p-6 text-center text-sm fade-in">加载动图中…</div>`;
   bindUgoiraGestures(stage);
   loadUgoiraAt(_ugIdx);
+  pushNav(() => _rebuildLevel(), undefined, state.curLevel);  // 返回键/手势关播放器，而不是退出应用
 }
 
 function loadUgoiraAt(idx) {
@@ -950,28 +1179,44 @@ function hideViewer() {
 }
 
 function closeViewer() {
-  _ugCancel = true;
-  _ugActive = false;
-  _ugPaused = false;
-  if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
-  _ugAbortPending();  // 中止在途帧请求
-  _ugImgs = []; _ugFrameData = [];  // 释放预加载帧内存
-  if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
-  destroyViewer();
-  state.viewer = null;
-  // 恢复原列表
-  if (state.curLevel === 3 && state.images.length) {
-    app.innerHTML = browseShell();
-    renderBreadcrumb();
-    renderImages();
-    _restoreScroll(state.scrollPosByLevel[3]);
-  } else if (state.curLevel === 2) {
-    loadCharacters(state.breadcrumb[0], state.breadcrumb[1]);
-  } else if (state.curLevel === 1) {
-    loadSeries(state.breadcrumb[0]);
-  } else {
-    renderBrowse();
+  if (_viewerTeardown) return;  // Viewer.js destroy() 内部会回调 hidden，忽略这次
+  // 优先走历史：popstate 会重建下面的列表（与返回键同一条路径）
+  const viaHistory = navBack();
+  _teardownViewer();
+  if (viaHistory) return;
+  _rebuildLevel();
+}
+
+// 释放查看器/动图播放器资源（不动历史、不重绘）
+function _teardownViewer() {
+  if (_viewerTeardown) return;
+  _viewerTeardown = true;
+  try {
+    _ugCancel = true;
+    _ugActive = false;
+    _ugPaused = false;
+    if (_ugTimer) { clearTimeout(_ugTimer); _ugTimer = null; }
+    if (state.viewer && state.viewer.animTimer) clearInterval(state.viewer.animTimer);
+    _ugAbortPending();
+    _ugImgs = []; _ugFrameData = [];  // 释放预加载帧内存
+    destroyViewer();
+    state.viewer = null;
+  } finally {
+    _viewerTeardown = false;
   }
+}
+
+// 重建查看器下面的列表层（缓存同步渲染，不重新拉取）
+function _rebuildLevel() {
+  _teardownViewer();
+  const b = state.breadcrumb;
+  if (state.curLevel === 3 && state.images.length) {
+    return _renderCached(3, b, state.scrollPosByLevel[3] || 0);
+  }
+  if (state.curLevel === 3) return _applyImages(b[0], b[1], b[2] || undefined);
+  if (state.curLevel === 2) return _renderCached(2, [b[0], b[1]], state.scrollPosByLevel[2] || 0);
+  if (state.curLevel === 1) return _renderCached(1, [b[0]], state.scrollPosByLevel[1] || 0);
+  return _showView('browse');
 }
 
 function nextPage() { if (_viewer) _viewer.next(); }
@@ -1142,7 +1387,7 @@ function renderPreview(p) {
         <div id="pick-tip" class="text-xs text-gray-500 mb-4 min-h-4">未选择（将归档到 _未分类）</div>
       </div>
       <div class="flex gap-2">
-        <button id="dl-start" onclick="startDownload('${p.id}')" class="btn-primary" style="flex:1">开始下载</button>
+        <button id="dl-start" data-act="startDownload" data-id="${esc(p.id)}" class="btn-primary" style="flex:1">开始下载</button>
         <button onclick="renderDownload()" class="btn-ghost">取消</button>
       </div>
     </div>`;
@@ -1272,9 +1517,9 @@ function showTask(task, meta) {
   const div = document.createElement('div');
   div.className = 'card p-4 mb-3';
   div.innerHTML = `
-    <div class="flex items-center justify-between mb-2">
-      <div class="font-medium text-sm">作品 ${esc(task.work_id)}</div>
-      <div class="task-status text-xs"></div>
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="font-medium text-sm shrink-0 whitespace-nowrap">作品 ${esc(task.work_id)}</div>
+      <div class="task-status text-xs flex items-center justify-end gap-1 min-w-0"></div>
     </div>
     <div class="h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
       <div class="task-bar h-full bg-pixiv-blue transition-all" style="width:0%"></div>
@@ -1331,14 +1576,20 @@ function updateTaskUI(id, t) {
   if (!entry) return;
   const pct = t.total > 0 ? Math.round(t.progress / t.total * 100) : 0;
   entry.barEl.style.width = pct + '%';
-  let label;
-  if (t.status === 'running') label = `${pct}%`;
-  else if (t.status === 'done') label = `<span style="color:var(--ok);margin-right:2px">${ICONS.check}</span>完成 → ${esc(t.target || '')}`;
-  else if (t.status === 'error') label = `<span style="color:var(--danger);margin-right:2px">${ICONS.x}</span>${esc(t.error || '失败')}`;
-  else if (t.status === 'cancelled') label = '已取消';
-  else if (t.status === 'queued') label = '排队中…';
-  else label = esc(String(t.status));
-  entry.statusEl.innerHTML = label;
+  // 状态行：图标与文字同一行，长路径/长错误单行省略（完整内容挂 title，细节在下方日志里）
+  let icon = '', text = '';
+  if (t.status === 'running') text = `${pct}%`;
+  else if (t.status === 'done') {
+    icon = `<span class="ts-ico" style="color:var(--ok)">${ICONS.check}</span>`;
+    text = `完成 → ${t.target || ''}`;
+  } else if (t.status === 'error') {
+    icon = `<span class="ts-ico" style="color:var(--danger)">${ICONS.x}</span>`;
+    text = t.error || '失败';
+  } else if (t.status === 'cancelled') text = '已取消';
+  else if (t.status === 'queued') text = '排队中…';
+  else text = String(t.status);
+  entry.statusEl.innerHTML = icon +
+    `<span class="ts-tx truncate min-w-0"${icon ? ` title="${esc(text)}"` : ''}>${esc(text)}</span>`;
   if (t.log && t.log.length) {
     entry.logEl.innerHTML = t.log.map(l => esc(l)).join('<br>');
     entry.logEl.scrollTop = entry.logEl.scrollHeight;
@@ -1371,7 +1622,7 @@ async function clearTask(taskId) {
     await api('/api/download/' + taskId + '/clear', { method: 'DELETE' });
   } catch (e) {
     // 服务端已无该任务（如已被其他会话清除）时仍允许本地移除；其余错误提示
-    if (!String(e.message).includes('404')) {
+    if (e.status !== 404) {
       alert('清除失败: ' + e.message);
       return;
     }
@@ -1407,7 +1658,7 @@ async function cancelTask(taskId) {
     ok = !!(r && r.cancelled);
   } catch (e) {
     // 服务端已无该任务（已被其他会话清除）：本地照样清理
-    if (String(e.message).includes('404')) ok = true;
+    if (e.status === 404) ok = true;
     else { alert('取消失败: ' + e.message); return; }
   }
   // 取消即丢弃：卡片立即移除（服务端任务由 worker 退出时摘除 / 顶部列表已过滤）
@@ -1461,4 +1712,5 @@ async function saveConfig() {
 }
 
 // 初始化
-showView('browse');
+_showView('browse');
+replaceNav(() => _showView('browse'), VIEW_TITLES.browse, 0);

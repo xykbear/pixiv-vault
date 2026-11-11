@@ -269,6 +269,11 @@ tailwind.config = {
   .chip-series::after{ content:' 系列'; font-size:.6rem; opacity:.85; }
   .chip-character::after{ content:' 角色'; font-size:.6rem; opacity:.85; }
 
+  /* 任务卡状态（下载视图）：图标与文字同一行，长路径/长错误单行省略不换行 */
+  .task-status{ min-width:0; }
+  .ts-ico{ display:inline-flex; flex:0 0 auto; }
+  .ts-tx{ min-width:0; }
+
   .skeleton { animation: pulse 1.5s ease-in-out infinite; background: #eee; border-radius: 8px; }
   @keyframes pulse { 0%,100% {opacity:1} 50% {opacity:0.4} }
   input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
@@ -328,6 +333,6 @@ tailwind.config = {
   </div>
 </div>
 
-<script src="/app.js?v=20261007b"></script>
+<script src="/app.js?v=20261112a"></script>
 </body>
 </html>
