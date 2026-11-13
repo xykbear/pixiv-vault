@@ -149,7 +149,8 @@ window.addEventListener('popstate', (e) => {
 const VIEW_TITLES = { browse: '浏览', download: '下载', settings: '设置' };
 
 // 切 tab（不记历史；记录由 showView 负责）
-function _showView(name) {
+// restoreY：仅浏览 tab 使用（历史回退重建根层时恢复位置）；省略 = 顶部
+function _showView(name, restoreY) {
   cleanupViewerOnTabSwitch();   // 换屏先拆掉覆盖层，避免 Viewer.js 容器残留在 body 上
   state.view = name;
   state.searchMode = false;
@@ -157,7 +158,7 @@ function _showView(name) {
   state.returnTo = null;
   closeMenu();
   syncChrome();
-  if (name === 'browse') renderBrowse();
+  if (name === 'browse') renderBrowse(restoreY);
   if (name === 'download') renderDownload();
   if (name === 'settings') renderSettings();
 }
@@ -166,9 +167,11 @@ function showView(name) {
   // 重复点当前 tab 只是回到顶层，不产生一条"看起来没反应"的历史
   // curLevel 只在"回浏览根"时才算变化：深层浏览后重复点当前 tab 不该再压一条历史
   const changed = name !== state.view || state.searchMode || (name === 'browse' && state.curLevel !== 0);
-  _showView(name);
+  _showView(name);   // 主动点 tab 一律回顶部（回退重建时才恢复位置）
   // 浏览 tab 视为 0 层（面包屑可跳），另两个 tab 不是浏览层级
-  if (changed) pushNav(() => _showView(name), VIEW_TITLES[name], name === 'browse' ? 0 : undefined);
+  // 历史回退重建：恢复该 tab 离开时的根层位置（浏览 tab 才有根层滚动）
+  if (changed) pushNav(() => _showView(name, name === 'browse' ? (state.scrollPosByLevel[0] || 0) : 0),
+    VIEW_TITLES[name], name === 'browse' ? 0 : undefined);
 }
 
 // 切换 tab / 重建界面时清理查看器资源（动图定时器/Viewer.js），避免后台持续请求
@@ -220,7 +223,10 @@ function browseShell() {
     </div>`;
 }
 
-async function renderBrowse() {
+// restoreY：根层滚动位置。省略（tab 点击/冷启动/兜底）从顶部开始；
+// 历史回退重建根层时传入记忆位置——否则会把离开时记下的位置覆盖成 0
+// （与系列/角色/图片层的 _renderCached 恢复对齐）。
+async function renderBrowse(restoreY) {
   resetSearch();
   state.returnTo = null;
   state.curLevel = 0;
@@ -229,11 +235,12 @@ async function renderBrowse() {
     const d = await api('/api/tree/authors');
     state.authors = d.authors;
   }
-  state.scrollPosByLevel[0] = 0;
+  const y = restoreY === undefined ? 0 : restoreY;
+  state.scrollPosByLevel[0] = y;
   app.innerHTML = browseShell();
   renderBreadcrumb();
   renderAuthors();
-  _restoreScroll(0);
+  _restoreScroll(y);
 }
 
 // ================= 全库搜索（唯一搜索语义 · 仅 Enter 触发） =================
@@ -1734,4 +1741,5 @@ async function saveConfig() {
 
 // 初始化
 _showView('browse');
-replaceNav(() => _showView('browse'), VIEW_TITLES.browse, 0);
+// 根条目 = 作者列表：回退到它时恢复离开时的位置（冷启动无记录 → 0）
+replaceNav(() => _showView('browse', state.scrollPosByLevel[0] || 0), VIEW_TITLES.browse, 0);
