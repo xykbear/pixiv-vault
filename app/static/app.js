@@ -290,14 +290,33 @@ function searchShell() {
     </div>`;
 }
 
+// 当前层可搜索实体：搜索预填的来源。作者层与系列列表层不填（那里只有作者上下文），
+// 作者名永不出现在查询里；L2 取系列名、L3 取角色名（无角色时用系列名兜底）。
+// _未分類/Collections 在索引里没有对应条目，填了只会得到"无命中"，故跳过。
+const SEARCH_SEED_SKIP = new Set(['_未分類', '_未分类', 'Collections']);
+function currentSearchSeed() {
+  // 下载/设置 tab 下 breadcrumb 是上次浏览的残留，必须用 view 卡住
+  if (state.view !== 'browse' || state.searchMode) return '';
+  const c = state.breadcrumb || [];
+  // 系列层被全库索引整体跳过（_未分類/Collections）→ 其下任意实体都无命中，一律不填
+  if (c[1] && SEARCH_SEED_SKIP.has(c[1])) return '';
+  const pick = (s) => (s && !SEARCH_SEED_SKIP.has(s)) ? s : '';
+  if (state.curLevel === 2) return pick(c[1]);
+  if (state.curLevel === 3) return c[2] ? pick(c[2]) : pick(c[1]);
+  return '';
+}
+
 // 挂载搜索视图（首次进入传 null；从结果返回时传 returnTo 以原地恢复）
-function mountSearch(rt) {
+// seed：当前层预填值（仅首次进入生效；返回重建以 returnTo.query 为准，不覆盖用户查询）
+function mountSearch(rt, seed) {
   state.searchMode = true;
   state.searchQuery = (rt && rt.query) || '';
   app.innerHTML = searchShell();
   const inp = $('#search-input');
+  const seeded = !rt && !!seed;
   if (inp) {
-    inp.value = state.searchQuery;
+    // 预填不写 state.searchQuery：它只表示"用户已发起的查询"，仍由回车写入
+    inp.value = seeded ? seed : state.searchQuery;
     inp.addEventListener('keydown', e => {
       if (e.key !== 'Enter') { if (e.key === 'Escape') closeSearch(); return; }
       // 输入法选词确认也用回车：此时不能拦截默认行为，也不能提交
@@ -314,6 +333,8 @@ function mountSearch(rt) {
     const clr0 = $('.sclr');
     if (clr0) clr0.style.display = inp.value ? 'flex' : 'none';  // 恢复结果时也要按值同步
     inp.focus();
+    // 全选预填文本，便于直接改写（iOS Safari 对 select() 不稳，用 setSelectionRange）
+    if (seeded) { try { inp.setSelectionRange(0, inp.value.length); } catch (e) {} }
   }
   if (rt && rt.results) {
     state.searchResults = rt.results;
@@ -332,7 +353,7 @@ function openSearch() {
   state._viewBeforeSearch = state.view;
   state.returnTo = null;
   cleanupViewerOnTabSwitch();
-  mountSearch(null);
+  mountSearch(null, currentSearchSeed());
   // 搜索是一屏：从图片层返回时用内存里的 returnTo 原地恢复结果与滚动位置
   pushNav(() => {
     const rt = state.returnTo;
